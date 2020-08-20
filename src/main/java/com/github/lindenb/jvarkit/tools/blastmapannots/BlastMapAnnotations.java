@@ -29,6 +29,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.StringReader;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.TreeMap;
 
@@ -46,42 +47,92 @@ import org.xml.sax.EntityResolver;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
 
+import com.beust.jcommander.Parameter;
+import com.github.lindenb.jvarkit.util.jcommander.Launcher;
+import com.github.lindenb.jvarkit.util.jcommander.Program;
+import com.github.lindenb.jvarkit.util.log.Logger;
+/**
+BEGIN_DOC
 
-import net.sf.picard.cmdline.CommandLineProgram;
-import net.sf.picard.cmdline.Option;
-import net.sf.picard.cmdline.StandardOptionDefinitions;
-import net.sf.picard.cmdline.Usage;
-import net.sf.picard.util.Log;
+## Example
 
+Download uniprot P04514  ( Rotavirus Non-structural protein 3 )  as <b>XML</b>
+```bash
+$ curl -o P04514.xml "http://www.uniprot.org/uniprot/P04514.xml"
+```
+Download the same P04514 as <b>fasta</b>
+```bash
+$ curl -o P04514.fasta "http://www.uniprot.org/uniprot/P04514.fasta"
+```
+
+<b>TblastN</b> P04514.fasta vs a RNA of NSP3 in genbank http://www.ncbi.nlm.nih.gov/nuccore/AY065842.1 and save the ouput as XML:
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE BlastOutput PUBLIC "-//NCBI//NCBI BlastOutput/EN" "http://www.ncbi.nlm.nih.gov/dtd/NCBI_BlastOutput.dtd">
+<BlastOutput>
+  <BlastOutput_program>tblastn</BlastOutput_program>
+(...)
+<Hit>
+  <Hit_num>1</Hit_num>
+  <Hit_id>gi|18139606|gb|AY065842.1|</Hit_id>
+  <Hit_def>Rhesus rotavirus nonstructural protein 3 (NSP3) gene, complete cds</Hit_def>
+  <Hit_accession>AY065842</Hit_accession>
+  <Hit_len>1078</Hit_len>
+  <Hit_hsps>
+    <Hsp>
+      <Hsp_bit-score>546.584</Hsp_bit-score>
+      <Hsp_score>1407</Hsp_score>
+      <Hsp_evalue>0</Hsp_evalue>
+      <Hsp_query-from>1</Hsp_query-from>
+      <Hsp_query-to>313</Hsp_query-to>
+      <Hsp_hit-from>26</Hsp_hit-from>
+      <Hsp_hit-to>964</Hsp_hit-to> <Hsp_qseq>MLKMESTQQMASSIINTSFEAAVVAATSTLELMGIQYDYNEIYTRVKSKFDYVMDDSGVKNNLLGKAATIDQALNGKFGSVMRNKNWMTDSRTVAKLDEDVNKLRMMLSSKGIDQKMRVLNACFSVKRIPGKSSSVIKCTRLMKDKIERGAVEVDDSFVEEKMEVDTVDWKSRYDQLERRFESLKQRVNEKYTTWVQKAKKVNENMYSLQNVISQQQNQIADLQNYCSKLEADLQNKVGSLVSSVEWYLKSMELPDEVKTDIEQQLNSIDTISPINAIDDLEILIRNLIHDYDRTFLMFKGLLRQCNYEYAYE</Hsp_qseq>
+      <Hsp_hseq>MLKMESTQQMASSIINSSFEAAVVAATSTLELMGIQYDYNEVYTRVKSKFDLVMDDSGVKNNLIGKAITIDQALNGKFSSAIRNRNWMTDSRTVAKLDEDVNKLRIMLSSKGIDQKMRVLNACFSVKRIPGKSSSIVKCTRLMKDKLERGEVEVDDSFVEEKMEVDTIDWKSRYEQLEKRFESLKHRVNEKYNHWVLKARKVNENMNSLQNVISQQQAHINELQMYNNKLERDLQSKIGSVVSSIEWYLRSMELSDDVKSDIEQQLNSIDQLNPVNAIDDFESILRNLISDYDRLFIMFKGLLQQCNYTYTYE</Hsp_hseq>
+      <Hsp_midline>MLKMESTQQMASSIIN SFEAAVVAATSTLELMGIQYDYNE YTRVKSKFD VMDDSGVKNNL GKA TIDQALNGKF S  RN NWMTDSRTVAKLDEDVNKLR MLSSKGIDQKMRVLNACFSVKRIPGKSSS  KCTRLMKDK ERG VEVDDSFVEEKMEVDT DWKSRY QLE RFESLK RVNEKY  WV KA KVNENM SLQNVISQQQ  I  LQ Y  KLE DLQ K GS VSS EWYL SMEL D VK DIEQQLNSID   P NAIDD E   RNLI DYDR F MFKGLL QCNY Y YE</Hsp_midline>
+    </Hsp>
+  </Hit_hsps>
+</Hit>
+(...)
+</Iteration>
+</BlastOutput_iterations>
+</BlastOutput>
+```
+Now produce a BED file with this blast result to map the features of P04514 to AY065842.
+
+```bash
+$ java -jar dist/blastmapannots.jar I=P04514.xml B=blast.xml
+
+AY065842	25	961	Non-structural_protein_3	943	+	25961	255,255,255	1	936	25
+AY065842	34	469	RNA-binding	970	+	34	469	255,255,255	1	435	34
+AY065842	472	640	Dimerization	947	+	472	640	255,255,255	1	168	472
+AY065842	532	724	Interaction_with_ZC3H7B	917	+	532	724	255,255,255	1	192	532
+AY065842	646	961	Interaction_with_EIF4G1	905	+	646	961	255,255,255	1	315	646
+AY065842	520	733	coiled-coil_region	916	+	520	733	255,255,255	1	213	520
+```
+END_DOC
+
+*/
+@Program(name="blastmapannots",
+	description="Maps uniprot/genbank annotations on a blast result.",
+	keywords={"blast","annotation","genbank","uniprot"}
+		)
 public class BlastMapAnnotations
-	extends CommandLineProgram
+	extends Launcher
 	{
-    private static Log LOG=Log.getInstance(BlastMapAnnotations.class); 
+    private static Logger LOG=Logger.build(BlastMapAnnotations.class).make(); 
 	
 	private BlastOutput blastOutput=null;
 	
-	@Usage(programVersion="1.0")
-	public String USAGE=getStandardUsagePreamble()+"Maps uniprot/genbank annotations on a blast result. ";
     
-    @Option(shortName= StandardOptionDefinitions.INPUT_SHORT_NAME, doc="XML sequence file Genbank.xml or uniprot.xml.",optional=false)
-	public File IN=null;
-    @Option(shortName= "B", doc="BLAST XML output (or stdin).",optional=true)
-	public File BLAST=null;
-    @Option(shortName= "APC", doc="append the sequence accession before the feature name.",optional=true)
-	public boolean APPEND_ACN=false;
-   
+    @Parameter(names={"-u","-g","--genbank","--uniprot"}, description="XML sequence file Genbank.xml or uniprot.xml.",required=true)
+    private File IN=null;
+    @Parameter(names={"-APC"}, description="append the sequence accession before the feature name.",required=true)
+    private boolean APPEND_ACN=false;	
+    @Parameter(names= "--include", description="Restrict to uniprot/feature/type of genbank/feature/key.")
+	private Set<String> INCL=new HashSet<String>();
+    @Parameter(names= "--exclude", description="Exclude uniprot/feature/type of genbank/feature/key.")
+	private Set<String> EXCL=new HashSet<String>();
 	
-	@Option(shortName= "INCLUDE", doc="Restrict to uniprot/feature/type of genbank/feature/key.",optional=true,minElements=0)
-	public Set<String> INCL=new HashSet<String>();
-	@Option(shortName= "EXCLUDE", doc="Exclude uniprot/feature/type of genbank/feature/key.",optional=true,minElements=0)
-	public Set<String> EXCL=new HashSet<String>();
-	
-
-    @Override
-    public String getVersion()
-    	{
-    	return "1.0";
-    	}
 
 	
 	private static class BlastPos
@@ -405,7 +456,7 @@ public class BlastMapAnnotations
 			int bedEnd= Math.max(convertQuery(getEntryStart1()).hit,convertQuery(getEntryEnd1()).hit);
 			if(bedEnd==getBedStart())
 				{
-				LOG.warn("Empty bed:", this.toString());
+				LOG.warning("Empty bed:");
 				}
 			return bedEnd;
 			}
@@ -651,7 +702,7 @@ public class BlastMapAnnotations
 								{
 								continue;
 								}
-							System.out.println(bi.toBedString());
+							stdout().println(bi.toBedString());
 							}
 						}
 					
@@ -699,7 +750,7 @@ public class BlastMapAnnotations
 								LOG.debug("interval "+bi);
 								if(!bi.isGbForward()) LOG.info("CHECK INTERVAL REVERSE");
 								if(!bi.isFeatureOverlapHsp()) continue;
-								System.out.println(bi.toBedString());
+								stdout().println(bi.toBedString());
 								}
 							}
 						
@@ -713,11 +764,8 @@ public class BlastMapAnnotations
 		
 		}
 	
-
-	
 	@Override
-	protected int doWork()
-		{
+	public int doWork(List<String> args) {
 		try
 			{
 			/** xml parser */
@@ -769,15 +817,20 @@ public class BlastMapAnnotations
 				return -1;
 				}
 			Document blastDom;
-			if(BLAST!=null)
+			if(args.size()==1)
 				{
-				LOG.info("reading "+BLAST);
-				blastDom=docBuilder.parse(BLAST);
+				LOG.info("reading "+args.get(0));
+				blastDom=docBuilder.parse(new File(args.get(0)));
+				}
+			else if(args.isEmpty())
+				{
+				LOG.info("reading from stdin");
+				blastDom=docBuilder.parse(stdin());
 				}
 			else
 				{
-				LOG.info("reading from stdin");
-				blastDom=docBuilder.parse(System.in);
+				LOG.error("Illegal number of args");
+				return -1;
 				}
 			this.blastOutput=unmarshaller.unmarshal(blastDom,BlastOutput.class).getValue();	
 			if(uniprotSet!=null) printUniprot(uniprotSet);

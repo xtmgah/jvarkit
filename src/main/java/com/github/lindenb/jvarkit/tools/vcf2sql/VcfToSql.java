@@ -1,717 +1,881 @@
+/*
+ The MIT License (MIT)
+
+Copyright (c) 2020 Pierre Lindenbaum
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+History:
+* 2014 creation
+
+*/
 package com.github.lindenb.jvarkit.tools.vcf2sql;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
-import java.util.regex.Pattern;
+import java.util.Map;
 
-import org.broad.tribble.readers.AsciiLineReader;
-import org.broadinstitute.variant.variantcontext.Allele;
-import org.broadinstitute.variant.variantcontext.CommonInfo;
-import org.broadinstitute.variant.variantcontext.Genotype;
-import org.broadinstitute.variant.variantcontext.GenotypesContext;
-import org.broadinstitute.variant.variantcontext.VariantContext;
-import org.broadinstitute.variant.vcf.VCFCodec;
-import org.broadinstitute.variant.vcf.VCFConstants;
-import org.broadinstitute.variant.vcf.VCFHeader;
-import org.broadinstitute.variant.vcf.VCFHeaderLine;
-import org.broadinstitute.variant.vcf.VCFHeaderVersion;
-import org.broadinstitute.variant.vcf.VCFInfoHeaderLine;
+import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.samtools.SAMSequenceRecord;
+import htsjdk.samtools.util.CloserUtil;
+import htsjdk.variant.variantcontext.Allele;
+import htsjdk.variant.variantcontext.Genotype;
+import htsjdk.variant.variantcontext.VariantContext;
+import htsjdk.variant.vcf.VCFConstants;
+import htsjdk.variant.vcf.VCFFilterHeaderLine;
+import htsjdk.variant.vcf.VCFHeader;
 
+import com.beust.jcommander.Parameter;
+import com.github.lindenb.jvarkit.util.jcommander.Launcher;
+import com.github.lindenb.jvarkit.util.jcommander.Program;
+import com.github.lindenb.jvarkit.util.log.Logger;
+import com.github.lindenb.jvarkit.util.picard.SAMSequenceDictionaryProgress;
+import com.github.lindenb.jvarkit.util.vcf.VCFUtils;
+import htsjdk.variant.vcf.VCFIterator;
+import com.github.lindenb.jvarkit.util.vcf.predictions.VepPredictionParser;
+import com.github.lindenb.jvarkit.util.vcf.predictions.VepPredictionParser.VepPrediction;
+import com.github.lindenb.jvarkit.util.vcf.predictions.VepPredictionParserFactory;
 
-import com.github.lindenb.jvarkit.util.picard.IOUtils;
+/**
+BEGIN_DOC
 
-import net.sf.picard.cmdline.CommandLineProgram;
-import net.sf.picard.cmdline.Option;
-import net.sf.picard.cmdline.StandardOptionDefinitions;
-import net.sf.picard.cmdline.Usage;
-import net.sf.picard.util.Log;
+## Examples
 
-@SuppressWarnings("rawtypes")
-public class VcfToSql extends CommandLineProgram
+```bash
+java -jar dist/vcf2sql.jar  file.vcf | mysql -u user -p -D vcf_db 
+```
+## Database schema (dot)
+
+```dot
+digraph G{
+vcffile;
+sample;
+sample2file;
+allele;
+filter;
+chromosome;
+variant;
+variant2alt;
+variant2filter;
+vepPrediction;
+vepPrediction2so;
+genotype;
+sample2file -> vcffile[label=vcffile_id];
+sample2file -> sample[label=sample_id];
+filter -> vcffile[label=vcffile_id];
+chromosome -> vcffile[label=vcffile_id];
+variant -> vcffile[label=vcffile_id];
+variant -> chromosome[label=chromosome_id];
+variant -> allele[label=ref_id];
+variant2alt -> variant[label=variant_id];
+variant2alt -> allele[label=alt_id];
+variant2filter -> variant[label=variant_id];
+variant2filter -> filter[label=filter_id];
+vepPrediction -> variant[label=variant_id];
+vepPrediction2so -> vepPrediction[label=vepPrediction_id];
+genotype -> variant[label=variant_id];
+genotype -> sample[label=sample_id];
+genotype -> allele[label=a1_id];
+genotype -> allele[label=a2_id];
+}
+
+```
+END_DOC
+*/
+@Program(name="vcf2sql",
+		description="Generate the SQL code to insert a VCF into mysql",
+		keywords={"vcf","sql"}
+		)
+public class VcfToSql extends Launcher
 	{
-	
-	@Usage(programVersion="1.0")
-	public String USAGE=getStandardUsagePreamble()+"Creates the code to insert one or more VCF into a SQL database. ";
-    @Option(shortName= StandardOptionDefinitions.INPUT_SHORT_NAME, doc="VCF files to process.",minElements=0)
-	public List<File> IN=new ArrayList<File>();
+	private static final Logger LOG = Logger.build(VcfToSql.class).make();
+
+
+	@Parameter(names={"-o","--output"},description=OPT_OUPUT_FILE_OR_STDOUT)
+	private File outputFile = null;
+	@Parameter(names={"-s","--schema"},description="Print Schema")
+	private boolean print_schema = false;
+	@Parameter(names={"-d","--drop"},description="Add Drop Tables Statement")
+	private boolean drop_tables = false;
+	@Parameter(names={"-n","--noinfo"},description="ignore INFO column")
+	private boolean ignore_info = false;
+	@Parameter(names={"-f","--nofilter"},description="ignore FILTER column")
+	private boolean ignore_filter = false;
+    private PrintWriter outputWriter =null;
     
-    @Option(shortName="SFX",doc="Table suffix",optional=true)
-	public String SUFFIX="";
-    @Option(shortName="VEP",doc="Use  and explode VEP predictions",optional=true)
-	public boolean USE_VEP=true;
-    @Option(shortName="SNPEFF",doc="Use and explode SNPEFF predictions",optional=true)
-	public boolean USE_SNPEFF=true;
-    @Option(shortName="SQLIDX",doc="Create misc SQL Indexes.",optional=true)
-	public boolean SQLINDEX=true;
-    @Option(shortName="EGN",doc="sql engine [sqlite,hsql]",optional=true)
-	public String ENGINE=SQLEngine.sqlite.name();
-    @Option(shortName="S4",doc="Split DP4",optional=true)
-	public boolean SPLIT4=false;
-    
-    private SQLEngine engine=SQLEngine.sqlite;
-    private enum SQLEngine {sqlite,hsql};
-    
-    private static Log LOG=Log.getInstance(VcfToSql.class); 
-    
-    private PrintWriter out=new PrintWriter(System.out);
-    
-    @Override
-    public String getVersion()
+    private class SelectStmt
     	{
-    	return "1.0";
+    	String sql;
+    	
+    	SelectStmt(final Table t,final String field,final Object o)
+			{
+    		final Column c=t.getColumnByBame(field);
+			this.sql="SELECT id from "+t.getAntiquote()+" where "+c.getAntiquote()+"="+c.escape(o);
+			}
+    	SelectStmt(final Table t)
+			{
+			this.sql="SELECT max(id) from "+t.getAntiquote();
+			}
+    	
+    	@Override
+    	public String toString() {
+    		return sql;
+    		}
+    	}
+    private abstract class AbstractComponent
+    	{
+    	String name;
+    	
+    	AbstractComponent(String name)
+			{
+			this.name=name;
+			}
+    	
+    	public String getName()
+    		{
+			return name;
+			}
+    	public String getAntiquote()
+    		{
+			return "`"+getName()+"`";
+			}
+    	
+    	}
+    
+    private class ColumnBuilder
+    	{
+    	private Table _foreignTable=null;
+    	private boolean _pkey=false;
+    	private boolean _indexed=false;
+    	private boolean _unique=false;
+    	private int _length=0;
+    	
+    	private String _name=null;
+    	private Class<?> _class=String.class;
+    	private boolean _nilleable=false;
+    	ColumnBuilder primaryKey() { this._pkey=true; return this;}
+    	ColumnBuilder name(String v) { this._name=v; return this;}
+    	ColumnBuilder type(Class<?> v) { this._class=v; return this;}
+    	ColumnBuilder foreignKey(Table v) { this._foreignTable=v;return this;}
+    	ColumnBuilder foreignKey(Table v,String name) {return foreignKey(v).name(name);}
+    	ColumnBuilder nilleable() { this._nilleable=true; return this;}
+    	ColumnBuilder indexed() { this._indexed=true; return this;}
+    	ColumnBuilder uniq() { this._unique=true; return this;}
+    	ColumnBuilder length(int v) { this._length=v; return this;}
+    	
+    	Column make()
+    			{
+    			Column c=null;
+    			if(_foreignTable!=null)
+    				{
+    				c = new ForeignKey(this._foreignTable);
+    				if(_name!=null) c.name=_name;
+    				}
+    			else if(_pkey)
+    				{
+    				c = new PrimaryKey();
+    				}
+    			else if(_class==Double.class)
+    				{
+    				c = new DoubleColumn(this._name);
+    				}
+    			else if(_class==Integer.class)
+    				{
+    				c = new IntegerColumn(this._name);
+    				}
+    			else  if(_class==String.class)
+    				{
+    				c = new StringColumn(this._name);
+    				}
+    			else
+    				{
+    				throw new IllegalArgumentException();
+    				}
+    			c.unique=this._unique;
+    			c.indexed=this._indexed;
+    			c.nilleable=this._nilleable;
+    			c.maxLength=this._length;
+    			if(_pkey) c.nilleable=true;
+    			return c;
+    			}
     	}
     
     
-    private String columnId()
+    private class TableBuilder
     	{
-    	switch(this.engine)
+    	boolean _insertIgnore=false;
+    	String _name=null;
+    	List<Column> _columns=new ArrayList<>();
+    	TableBuilder name(String v) { this._name=v; return this;}
+    	TableBuilder insertIgnore() { this._insertIgnore=true; return this;}
+    	TableBuilder columns(Column...cols) { this._columns.addAll(Arrays.asList(cols)); return this;}
+    	
+    	
+    	
+    	public Table make()
     		{
-    		case hsql: return "id INTEGER GENERATED ALWAYS AS IDENTITY(START WITH 1, INCREMENT BY 1) PRIMARY KEY,";
-    		default:return "id INTEGER PRIMARY KEY AUTOINCREMENT,";
+    		Table t=new Table(_name,this._columns);
+    		t.insertIgnore=_insertIgnore;
+    		return t;
     		}
     	}
     
-    private String varchar(int length)
+    private abstract class Column
+    	extends AbstractComponent
     	{
-    	switch(this.engine)
+    	boolean indexed=false;
+    	boolean unique=false;
+    	boolean nilleable=false;
+    	int maxLength=0;
+    	Table table;
+    	Column(String name)
 			{
-			case hsql: return "VARCHAR("+length+")";
-			default:return "TEXT";
+			super(name);
 			}
+    	Object escape(final Object o)
+    		{
+    		if(o==null)
+    			{
+    			if(!this.nilleable) throw new RuntimeException("column "+ this.table.getName()+"."+this.getName()+" : not set as nilleable");
+    			return "NULL";
+    			}
+    		else
+    			{
+    			return o;
+    			}
+    		}
+
+    	public  void createIndex(PrintWriter pw)
+    		{
+    		if(unique)
+    			{
+    			pw.print(",CONSTRAINT "+table.getName()+"_"+getName()+"_uniq UNIQUE("+getAntiquote()+")");
+    			}
+    		else if( indexed)
+    			{
+    			pw.print(",INDEX("+getAntiquote()+")");
+    			}
+    		}
+    	public abstract void createColumn(PrintWriter pw);
+    	
+    	
     	}
     
-    private String text()
+    private class LongColumn
+	extends Column
 		{
-		switch(this.engine)
+		LongColumn(String name)
 			{
-			case hsql: return "LONGVARCHAR";
-			default:return "TEXT";
+			super(name);
+			}
+		@Override
+		public void createColumn(PrintWriter pw)
+			{
+			pw.print(getAntiquote()+" INT "+(nilleable?"":" NOT ")+"NULL");
+			createIndex(pw);
 			}
 		}
 
     
-    
-	@Override
-	protected int doWork()
+    private class ForeignKey
+	extends LongColumn
 		{
-		try
+		Table referencesTable;
+    	public ForeignKey(Table t)
+    		{
+			super(t.getName()+"_id");
+			this.referencesTable=t;
+    		}
+    	
+    	
+    	@Override
+    	public void createIndex(PrintWriter pw) {
+    		pw.print( ",FOREIGN KEY ("+getAntiquote()+")  " +
+    				"REFERENCES "+referencesTable.getAntiquote()+"(id)"
+    				); 
+    		}
+    	
+    	@Override
+    	public void createColumn(PrintWriter pw)
+    		{
+    		pw.print( getAntiquote()+" INT "+(nilleable?"":"NOT")+" NULL");
+    		createIndex(pw);
+    		}
+
+
+		}
+    
+    private class PrimaryKey
+   	extends LongColumn
+   		{   		
+       	public PrimaryKey()
+       		{
+   			super("id");
+       		}
+       	       	
+       	@Override
+       	public void createIndex(PrintWriter pw) {
+       		pw.print(",PRIMARY KEY ("+getAntiquote()+")"  ); 
+       		}
+       	
+       	@Override
+    	public void createColumn(PrintWriter pw)
+    		{
+       		pw.print( getAntiquote()+" INT NOT NULL AUTO_INCREMENT");
+       		createIndex(pw);
+    		}
+   		}
+    
+    private class IntegerColumn
+	extends Column
+		{
+    	IntegerColumn(String name)
 			{
-			try
+			super(name);
+			}
+		@Override
+		public void createColumn(PrintWriter pw)
+			{
+			pw.print(  getAntiquote()+" INT "+(nilleable?"":" NOT ")+"NULL" );
+			createIndex(pw);
+			}
+
+		}
+    
+    private class DoubleColumn
+	extends Column
+		{
+    	DoubleColumn(String name)
+			{
+			super(name);
+			}
+		@Override
+		public void createColumn(PrintWriter pw)
+			{
+			pw.print(  getAntiquote()+" DOUBLE "+(nilleable?"":" NOT ")+"NULL");
+			createIndex(pw);
+			}
+
+		}
+
+    
+    private class StringColumn
+    	extends Column
+    	{
+    	StringColumn(String name)
+			{
+			super(name);
+			}
+    	@Override
+    	Object escape(Object o)
+			{
+    		if(o==null)
 				{
-				this.engine=SQLEngine.valueOf(this.ENGINE);
-				}
-			catch(Exception err)
-				{
-				LOG.error("BAD SQL ENGINE "+this.ENGINE);
-				return -1;
-				}
-		    out.println( "create table if not exists FILE"+SUFFIX+"("+
-		    		columnId()+
-		    		"filename "+varchar(255)+" NOT NULL"+
-		    		");");
-
-		    out.println( "create table if not exists HEADER"+SUFFIX+"("+
-		    		columnId()+
-					"file_id INT NOT NULL REFERENCES FILE"+SUFFIX+"(id) ON DELETE CASCADE,"+
-		    		"header "+text()+
-		    		");");
-
-		    
-		    out.println( "create table if not exists SAMPLE"+SUFFIX+"("+
-			    columnId()+
-			    "name "+varchar(100)+" NOT NULL UNIQUE"+
-			   ");");
-		    out.println( "create table if not exists VARIATION"+SUFFIX+"("+
-				columnId()+
-				"file_id INT NOT NULL REFERENCES FILE"+SUFFIX+"(id) ON DELETE CASCADE,"+
-				"CHROM VARCHAR(20) NOT NULL,"+
-				"POS INT NOT NULL,"+
-				"START0 INT NOT NULL,"+
-				"END0 INT NOT NULL,"+
-				"RS_ID VARCHAR(50),"+
-				"REF "+text()+" NOT NULL,"+
-				"QUAL FLOAT"+
-			    ");");
-		    
-		    out.println("create table if not exists ALT"+SUFFIX+"("+
-				columnId()+
-				"var_id INT NOT NULL REFERENCES VARIATION"+SUFFIX+"(id) ON DELETE CASCADE,"+
-				"ALT "+text()+
-				  ");");
-		    out.println("create table if not exists FILTER"+SUFFIX+"("+
-				columnId()+
-				"var_id INT NOT NULL REFERENCES VARIATION"+SUFFIX+"(id) ON DELETE CASCADE,"+
-				"FILTER varchar(50) not null"+
-				 ");");
-
-		    out.println("create table if not exists INFO"+SUFFIX+"("+
-				columnId()+
-				"var_id INT NOT NULL REFERENCES VARIATION"+SUFFIX+"(id) ON DELETE CASCADE,"+
-				"k varchar(50) not null,"+
-				"v "+text()+" not null"+
-				 ");");
-		    
-		    out.println("create table if not exists EXTRAINFO"+SUFFIX+"("+
-					columnId()+
-					"info_id INT NOT NULL REFERENCES INFO"+SUFFIX+"(id) ON DELETE CASCADE,"+
-					"type varchar(50) not null"+
-					 ");");
-		    
-		    out.println("create table if not exists EXTRAINFOPROP"+SUFFIX+"("+
-					columnId()+
-					"extrainfo_id INT NOT NULL REFERENCES EXTRAINFO"+SUFFIX+"(id) ON DELETE CASCADE,"+
-					"k varchar(50) not null,"+
-					"v "+text()+" not null"+
-					 ");");
-
-		    
-		    out.println(     "create table if not exists GENOTYPE"+SUFFIX+"("+
-				columnId()+
-				"var_id INT NOT NULL REFERENCES VARIATION"+SUFFIX+"(id) ON DELETE CASCADE,"+
-				"sample_id INT NOT NULL REFERENCES SAMPLE"+SUFFIX+"(id) ON DELETE CASCADE,"+
-				"A1 "+text()+", A2 "+text()+", dp int, ad varchar(50), gq float,pl "+text()+","+
-				"is_phased SMALLINT not null,is_hom SMALLINT not null,is_homref  SMALLINT not null,is_homvar  SMALLINT not null,is_mixed  SMALLINT not null," +
-				"is_nocall SMALLINT not null,is_noninformative SMALLINT not null,is_available SMALLINT not null,is_called SMALLINT not null,is_filtered  SMALLINT not null"+
-				");"
-				);
-		    out.println("create table if not exists GTPROP"+SUFFIX+"("+
-				columnId()+
-				"genotype_id INT NOT NULL REFERENCES GENOTYPE"+SUFFIX+"(id) ON DELETE CASCADE,"+
-				"k varchar(50) not null,"+
-				"v "+text()+" not null"+
-				 ");");
-		    switch(this.engine)
-		    	{
-		    	case sqlite:out.println("begin transaction;");break;
-		    	default:break;
-		    	}
-			
-			if(IN.isEmpty())
-				{
-				LOG.info("reading from stdin");
-				read(System.in,"<stdin>");
+				return super.escape(o);
 				}
 			else
 				{
-				for(File input: IN)
+				String s=String.valueOf(o);
+				if(s.length() >this.maxLength)
 					{
-					LOG.info("opening "+input);
-					InputStream in=IOUtils.openFileForReading(input);
-					read(in,input.toString());
-					in.close();
+					throw new RuntimeException("string length("+s+") greater  than "+this.maxLength+" L="+s.length()+" . Update source code for "+getAntiquote()+" "+table.getName());
 					}
+				StringBuilder sb=new StringBuilder(s.length()+2);
+				sb.append("\"");
+				for(int i=0;i< s.length();++i)
+					{
+					switch(s.charAt(i))
+						{	
+						case '\"': sb.append("\\\""); break;
+						default: sb.append(s.charAt(i)); break;
+						}
+					}
+				sb.append("\"");
+				return sb.toString();
 				}
-			if(SQLINDEX)
-				{
-				index("SAMPLE","name");
-				index("EXTRAINFO","type");
-				index("EXTRAINFOPROP","k");
-				index("EXTRAINFOPROP","v");
-				
-				index("INFO","var_id");
-				index("INFO","k");
-				index("EXTRAINFO","info_id");
-				index("EXTRAINFOPROP","extrainfo_id");
-				index("GENOTYPE","var_id");
-				index("GENOTYPE","sample_id");
-				}
-			 switch(this.engine)
-		    	{
-		    	case sqlite:out.println("commit;");break;
-		    	default:break;
-		    	}
-			
-			out.flush();
 			}
-		catch(IOException err)
-			{
-			err.printStackTrace();
-			return -1;
-			}
-		return 0;
-		}
-	
-	private void index(String table,String column)
-		{
-		out.print("create index ");
 
-		switch(this.engine)
+    	
+		@Override
+		public void createColumn(PrintWriter pw)
 			{
-			case hsql:break;
-			default: out.print(" if not exists ");break;
+			pw.print(  getAntiquote()+" VARCHAR("+(maxLength+1)+") "+
+					(nilleable?"":" NOT ")+"NULL" );
+			createIndex(pw);
 			}
-		
-		
-		out.print(" "+ (table+SUFFIX+"_"+column+"_IDX").toUpperCase() +
-				" on "+table+SUFFIX+"("+column+");");
-		}
+
+    	}
+    
+    private class Table
+    	extends AbstractComponent
+    	{
+    	boolean insertIgnore=false;
+    	List<Column> columns=new ArrayList<>();
+    	Map<String,Column> name2column=new HashMap<String,Column>();
+    	
+    	Table(String name,List<Column> columns)
+			{
+			super(name);
+			this.columns.addAll(columns);
+			for(Column c:columns)
+				{
+				c.table=this;
+				this.name2column.put(c.getName(), c);
+				}
+			}
+    	
+    	public Column getColumnByBame(String s)
+    		{
+    		for(Column c:this.columns) if(s.equals(c.getName())) return c;
+    		throw new RuntimeException("Cannot find col \""+s +"\" in "+getName());
+    		}
+    	
+    	void insert(PrintWriter pw,Object...row)
+    		{
+			pw.print("INSERT "+(insertIgnore?"IGNORE":"")+" INTO ");
+			pw.print(getAntiquote());
+			pw.print("(");
+			
+
+    		for(int i=0;i < this.columns.size();++i)
+				{
+				if(i>0) pw.print(',');
+				pw.print(this.columns.get(i).getAntiquote());
+				}
+    		pw.print(") VALUES (");
+    		
+			for(int i=0;i < this.columns.size();++i)
+    			{
+				Column c= this.columns.get(i);
+    			if(i>0 ) pw.print(',');
+    			if(row[i] instanceof SelectStmt)
+    				{
+    				pw.print("(");
+    				pw.print(SelectStmt.class.cast(row[i]));
+    				pw.print(")");
+    				}
+    			else
+    				{
+    				pw.print(c.escape(row[i]));
+    				}
+    			}
+			pw.println(");");
+    			
+    		
+    		}
+    	
+    	public void createTable(PrintWriter pw)
+    		{
+    		pw.println("CREATE TABLE IF NOT EXISTS "+getAntiquote()+" (" );
+    		for(int i=0;i< columns.size();++i)
+    			{
+    			if(i>0) pw.println(",");
+    			columns.get(i).createColumn(pw);
+    			}
+    		pw.println("\n) ENGINE=InnoDB, DEFAULT CHARSET=utf8 ;");
+    		}
+    	
+    	
+    	
+    	
+    	}
+    
+    private int MAX_ALLELE_LENGTH=250;
+    
+    private Table vcfFileTable = new TableBuilder().name("vcffile").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().name("file").length(250).uniq().make()
+    		).make();
+    
+    private Table sampleTable = new TableBuilder().name("sample").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().name("name").length(50).uniq().make()
+    		).insertIgnore().make();
+    
+    private Table sample2fileTable = new TableBuilder().name("sample2file").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().foreignKey(vcfFileTable).make(),
+    		new ColumnBuilder().foreignKey(sampleTable).make()
+    		).make();
+
+    
+    private Table filterTable = new TableBuilder().name("filter").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().foreignKey(vcfFileTable).make(),
+    		new ColumnBuilder().name("name").length(50).make(),
+    		new ColumnBuilder().name("description").length(250).make()
+    		).make();
+
+    private Table chromosomeTable = new TableBuilder().name("chromosome").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().foreignKey(vcfFileTable).make(),
+    		new ColumnBuilder().name("name").length(50).uniq().make(),
+    		new ColumnBuilder().name("chromLength").type(Integer.class).make()
+    		).make();
+    
+    private Table alleleTable = new TableBuilder().name("allele").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().name("bases").length(MAX_ALLELE_LENGTH).uniq().make()
+    		).insertIgnore().make(); 
+
+    
+    private Table variantTable = new TableBuilder().name("variant").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().foreignKey(vcfFileTable).make(),
+    		new ColumnBuilder().name("index_in_file").type(Integer.class).make(),
+    		new ColumnBuilder().foreignKey(chromosomeTable).make(),
+    		new ColumnBuilder().name("pos").indexed().type(Integer.class).make(),
+    		new ColumnBuilder().name("rsid").nilleable().length(15).indexed().make(),
+    		new ColumnBuilder().foreignKey(alleleTable,"ref_id").make(),
+    		new ColumnBuilder().name("qual").nilleable().type(Double.class).make()
+    		).make(); 
+    
+    private Table variant2altTable = new TableBuilder().name("variant2alt").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().foreignKey(variantTable).make(),
+    		new ColumnBuilder().foreignKey(alleleTable,"alt_id").make()
+    		).make(); 
+    
+    private Table variant2filters = new TableBuilder().name("variant2filter").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().foreignKey(variantTable).make(),
+    		new ColumnBuilder().foreignKey(filterTable).make()
+    		).make(); 
+
+    private Table vepPrediction = new TableBuilder().name("vepPrediction").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().foreignKey(variantTable).make(),
+    		new ColumnBuilder().name("ensGene").nilleable().length(20).make(),
+    		new ColumnBuilder().name("ensTranscript").nilleable().length(20).make(),
+    		new ColumnBuilder().name("ensProtein").nilleable().length(20).make(),
+    		new ColumnBuilder().name("geneSymbol").nilleable().length(20).make()
+    		).make(); 
+    
+    private Table soTermTable = new TableBuilder().name("soTerm").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().name("acn").uniq().length(11).make(),
+    		new ColumnBuilder().name("description").length(255).make()
+    		).insertIgnore().make(); 
+
+    
+    private Table vepPrediction2so = new TableBuilder().name("vepPrediction2so").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().foreignKey(vepPrediction).make(),
+    		new ColumnBuilder().foreignKey(soTermTable).make()
+    		).make(); 
+
+    
+    private Table genotypeTable = new TableBuilder().name("genotype").columns(
+    		new ColumnBuilder().primaryKey().make(),
+    		new ColumnBuilder().foreignKey(variantTable).make(),
+    		new ColumnBuilder().foreignKey(sampleTable).make(),
+    		new ColumnBuilder().foreignKey(alleleTable,"a1_id").nilleable().make(),
+    		new ColumnBuilder().foreignKey(alleleTable,"a2_id").nilleable().make(),
+    		new ColumnBuilder().name("dp").nilleable().type(Integer.class).make(),
+    		new ColumnBuilder().name("gq").nilleable().type(Double.class).make()
+    		).make(); 
+
+    private Table all_tables[]=new Table[]{
+    	   vcfFileTable,sampleTable,sample2fileTable,
+    	   alleleTable,filterTable,chromosomeTable,
+    	   variantTable,variant2altTable,variant2filters,
+    	   vepPrediction,
+    	   soTermTable,
+    	   vepPrediction2so,
+    	   genotypeTable
+    	};
+    
+    
+    public VcfToSql()
+    	{
+    	
+    	}
+    
 	
-	private void read(InputStream in,String filename)
+	private void read(File filename)
 		throws IOException
 		{
-		//Pattern comma=Pattern.compile("[,]");
-		Pattern pipe=Pattern.compile("[\\|]");
-		Pattern amp=Pattern.compile("&");
 
-		out.println("insert into FILE"+SUFFIX+"(filename) values ("+quote(filename)+");");
-		AsciiLineReader r=new AsciiLineReader(in);
-		
+		/* insert ATGC */
+		this.alleleTable.insert(outputWriter,null,"A");
+		this.alleleTable.insert(outputWriter,null,"C");
+		this.alleleTable.insert(outputWriter,null,"G");
+		this.alleleTable.insert(outputWriter,null,"T");
 
-		VCFCodec codec=new VCFCodec();
-		VCFHeader header=(VCFHeader)codec.readHeader(r);
 		
-		String csqColumns[]=null;
-		VCFInfoHeaderLine infoHeader=header.getInfoHeaderLine("CSQ");
-		if(infoHeader!=null && this.USE_VEP)
+		/* insert this sample */
+		this.vcfFileTable.insert(outputWriter,null,filename);
+		final SelectStmt vcffile_id = new SelectStmt(this.vcfFileTable);
+		
+		final Map<String,SelectStmt> sample2sampleid = new HashMap<String,SelectStmt>();
+		final Map<String,SelectStmt> filter2filterid = new HashMap<String,SelectStmt>();
+		final Map<String,SelectStmt> chrom2chromId = new HashMap<String,SelectStmt>();
+		
+		final VCFIterator r=VCFUtils.createVCFIteratorFromFile(filename);
+		final VCFHeader header=r.getHeader();
+		
+		/* parse samples */
+		for(final String sampleName:header.getSampleNamesInOrder())
 			{
-			LOG.info("parsing VEP "+infoHeader.getDescription());
-			final String formatStr="Format: ";
-			int i=infoHeader.getDescription().indexOf(formatStr);
-			if(i!=-1)
-				{
-				csqColumns=pipe.split(infoHeader.getDescription().substring(i+formatStr.length()).trim());
-				LOG.debug(Arrays.asList(csqColumns));
-				}
-			else
-				{
-				LOG.error("Cannot parse "+infoHeader.getDescription());
-				}
-			}
-		String snpEffColumns[]=null;
-		infoHeader=header.getInfoHeaderLine("EFF");
-		if(infoHeader!=null && this.USE_SNPEFF)
-			{
-			LOG.info("parsing EFF "+infoHeader.getDescription());
-
-			final String formatStr=".Format: '";
-			final String desc=infoHeader.getDescription();
-			int i=desc.indexOf(formatStr);
-			if(i!=-1) i=desc.indexOf('(',i+formatStr.length());
-			int j=desc.lastIndexOf(')');
-			if(i!=-1 && j>i)
-				{
-				snpEffColumns=pipe.split(desc.substring(i+1,j).replaceAll("[ \\[\\]()\\.]", "").trim());
-				LOG.info(Arrays.asList(snpEffColumns));
-				}
-			else
-				{
-				LOG.error("Cannot parse "+infoHeader.getDescription());
-				}
-			}
-		
-		String nmdColumns[]=null;
-		infoHeader=header.getInfoHeaderLine("NMD");
-		if(infoHeader!=null && this.USE_SNPEFF)
-			{
-
-			final String formatStr=" Format: '";
-			final String desc=infoHeader.getDescription();
-			int i=desc.indexOf(formatStr);
-			int j=(i==-1?-1:desc.lastIndexOf('\''));
-
-			if(i!=-1 && j>i)
-				{
-				nmdColumns=pipe.split(
-						desc.substring(i+formatStr.length(),j).replaceAll("[ \\[\\]()\\.]", "").trim());
-				}
-			else
-				{
-				LOG.error("Cannot parse "+infoHeader.getDescription());
-				}
-			}
-		
-		String lofColumns[]=null;
-		infoHeader=header.getInfoHeaderLine("LOF");
-		if(infoHeader!=null && this.USE_SNPEFF)
-			{
-
-			final String formatStr=" Format: '";
-			final String desc=infoHeader.getDescription();
-			int i=desc.indexOf(formatStr);
-			int j=(i==-1?-1:desc.lastIndexOf('\''));
-
-			if(i!=-1 && j>i)
-				{
-				lofColumns=pipe.split(
-						desc.substring(i+formatStr.length(),j).replaceAll("[ \\[\\]()\\.]", "").trim());
-				}
-			else
-				{
-				LOG.error("Cannot parse "+infoHeader.getDescription());
-				}
-			}
-		
-
-		
-		for(String S:header.getSampleNamesInOrder())
-			{
-			//merge into SAMPLE using (select 1+MAX(id),'azdazd' from SAMPLE) as vals(x,y) on SAMPLE.name=vals.y when  NOT MATCHED THEN INSERT VALUES vals.x,vals.y;
-			switch(this.engine)
-				{
-				case hsql:out.println(
-						"merge into SAMPLE"+SUFFIX+" using ( values("+quote(S)+") ) " +
-						"AS vals(y) ON SAMPLE"+SUFFIX+".name = vals.y " +
-						"WHEN NOT MATCHED THEN INSERT VALUES  (NULL,vals.y);");
-						break;
-				default:out.println("insert or ignore into SAMPLE"+SUFFIX+"(name) values ("+quote(S)+");");break;
-				
-				}
+			this.sampleTable.insert(outputWriter,null,sampleName);
+			SelectStmt sample_id = new SelectStmt(this.sampleTable, "name", sampleName);
+			sample2sampleid.put(sampleName,sample_id);
 			
+			this.sample2fileTable.insert(outputWriter,null,vcffile_id,sample_id);
 			}
 		
-		List<String> headers=new ArrayList<String>();
-
-         for ( VCFHeaderLine line : header.getMetaDataInSortedOrder() )
-         	{
-             if ( VCFHeaderVersion.isFormatString(line.getKey()) )
-                 continue;
-             headers.add(VCFHeader.METADATA_INDICATOR+line);
-             }	
-         
-         String chromLine=VCFHeader.HEADER_INDICATOR;
-         for ( VCFHeader.HEADER_FIELDS field : header.getHeaderFields() )
-         	{
-         	if(!VCFHeader.HEADER_INDICATOR.equals(chromLine))chromLine+=(VCFConstants.FIELD_SEPARATOR);
-         	chromLine+=(field);
-         	}
-
-         if ( header.hasGenotypingData() )
-         	 {
-        	 chromLine+=VCFConstants.FIELD_SEPARATOR+"FORMAT";
-             for ( String sample : header.getGenotypeSamples() ) {
-            	 chromLine+=VCFConstants.FIELD_SEPARATOR;
-                chromLine+=sample;
-             	}
-         	}
-         headers.add(chromLine); 
-
-         for(String line:headers)
-         	{
- 			out.println(
-					"insert into HEADER"+SUFFIX+
-					"(file_id,header) values ("+
-					"(select max(id) from FILE"+SUFFIX+"),"+
-					quote(line)+");"
+		/* parse filters */
+		for(final VCFFilterHeaderLine filter:header.getFilterLines())
+			{
+			this.filterTable.insert(
+					outputWriter,
+					null,
+					vcffile_id,
+					filter.getID(),
+					filter.getValue()
 					);
-         	}
-		
-		
-		String line;
-		
-		while((line=r.readLine())!=null)
-			{
-			LOG.debug(line);
-			VariantContext var=codec.decode(line);
-			
-			if(var==null)
-				{
-				LOG.error("Cannot parse "+line);
-				continue;
-				}
-			//"create table if not exists FILE(id,filename text)";
-			//"create table if not exists VARIATION(id,file_id,chrom,pos,start0,end0,rs_id,ref,qual)";
-		
-			
-			out.println(
-					"insert into VARIATION"+SUFFIX+
-					"(file_id,chrom,pos,START0,END0,rs_id,ref,qual) values ("+
-					"(select max(id) from FILE"+SUFFIX+"),"+
-					quote(var.getChr())+","+
-					var.getStart()+","+
-					(var.getStart()-1)+","+
-					var.getEnd()+","+
-					(var.getID()==null || var.getID().equals(VCFConstants.EMPTY_ID_FIELD) ?"NULL":quote(var.getID()))+","+
-					quote(var.getReference().getDisplayString())+","+
-					(var.getPhredScaledQual()<0?"NULL":var.getPhredScaledQual())+");"
-					);
-			//"create table if not exists ALT(id,var_id,alt)";
+			filter2filterid.put(filter.getID(), new SelectStmt(this.filterTable, "name", filter.getID()));
+			}
+		filter2filterid.put(VCFConstants.PASSES_FILTERS_v4, new SelectStmt(this.filterTable, "name", VCFConstants.PASSES_FILTERS_v4));
 
+		
+		final SAMSequenceDictionary dict= header.getSequenceDictionary();
+		if(dict==null)
+			{
+			throw new RuntimeException("dictionary missing in VCF");
+			}
+		/* parse sequence dict */
+		for(final SAMSequenceRecord ssr: dict.getSequences())
+			{
+			this.chromosomeTable.insert(
+					outputWriter,
+					null,
+					vcffile_id,
+					ssr.getSequenceName(),
+					ssr.getSequenceLength()
+					);
+			chrom2chromId.put(ssr.getSequenceName(), new SelectStmt(this.chromosomeTable,"name",ssr.getSequenceName()));
+			}
+		
+		VepPredictionParser vepPredictionParser=new VepPredictionParserFactory(header).get();
+		
+		SAMSequenceDictionaryProgress progress=new SAMSequenceDictionaryProgress(dict);
+		int nVariants=0;
+		while(r.hasNext())
+			{
+			if(this.outputWriter.checkError()) break;
+
+			
+			VariantContext var= progress.watch(r.next());
+			++nVariants;
+			/* insert ref allele */
+			this.alleleTable.insert(outputWriter, null,var.getReference().getBaseString());
+			
+			/* insert variant */
+			 this.variantTable.insert(
+				outputWriter,
+				null,
+				vcffile_id,
+				nVariants,
+				chrom2chromId.get(var.getContig()),
+				var.getStart(),
+				(var.hasID()?var.getID():null),
+				new SelectStmt(this.alleleTable, "bases", var.getReference().getBaseString()),
+				(var.hasLog10PError()?var.getPhredScaledQual():null)
+				);
+			
+			SelectStmt variant_id = new SelectStmt(variantTable);
+			 
+			 
+			/* insert alternate alleles */
 			for(Allele alt: var.getAlternateAlleles())
 				{
-				out.println(
-						"insert into ALT"+SUFFIX+"(var_id,alt) values ("+
-						"(select max(id) from VARIATION"+SUFFIX+"),"+
-						quote(alt.getDisplayString())+");"
-						);
-				}
-			//"create table if not exists FILTER(id,var_id,filter)";
+				/* insert alt allele */
+				this.alleleTable.insert(outputWriter, null,alt.getBaseString());
 
-			for(String filter:var.getFilters())
-				{
-				out.println(
-						"insert into FILTER"+SUFFIX+"(var_id,filter) values ("+
-						"(select max(id) from VARIATION"+SUFFIX+"),"+
-						quote(filter)+");"
-						);
-				}
-			CommonInfo infos=var.getCommonInfo();
-			for(String key:infos.getAttributes().keySet())
-				{
-				Object val=infos.getAttribute(key);
-				//"create table if not exists INFO(id,var_id,k,v)";
 				
-				if(SPLIT4 && key.equals("DP4"))
-					{
-					String dp4[]=infotoString(val).split("[,]");
-					insertIntoInfo(quote(key+"[refFor]"),quote( dp4[0]));
-					insertIntoInfo(quote(key+"[refRev]"),quote( dp4[1]));
-					insertIntoInfo(quote(key+"[altFor]"),quote( dp4[2]));
-					insertIntoInfo(quote(key+"[altRev]"),quote( dp4[3]));
-					}
-				else
-					{
-					insertIntoInfo(quote(key),quote(infotoString(val)));
-					}
-					
-				
-				if(key.equals("CSQ") && csqColumns!=null)
-					{
-					List as_array=castToStringArray(val);
-					
-					for(Object csqs:as_array)
-						{
-						if(csqs.toString().isEmpty()) continue;
-						String tokens[]=pipe.split(csqs.toString());
-						List<String> extraInfo=new ArrayList<String>();
-						for(int t=0;t<tokens.length && t<csqColumns.length;++t)
-							{
-							if(tokens[t].isEmpty()) continue;
-							if(csqColumns[t].equals("Consequence"))
-								{
-								for(String pred:amp.split(tokens[t]))
-									{
-									if(pred.isEmpty()) continue;
-									extraInfo.add(csqColumns[t]);
-									extraInfo.add(pred);
-									}
-								
-								}
-							else
-								{
-								extraInfo.add(csqColumns[t]);
-								extraInfo.add(tokens[t]);
-								}
-							}
-						insertExtraInfos("CSQ",extraInfo);
-						}
-					}
-				
-				if(key.equals("EFF") && snpEffColumns!=null)
-					{
-					for(Object item:castToStringArray(val))
-						{
-						String snpeff=item.toString();
-						if(snpeff.isEmpty()) continue;
-						int opar=snpeff.indexOf('(');
-						if(opar==-1) continue;
-						int cpar=snpeff.lastIndexOf(')');
-						if(cpar==-1) continue;
-						String tokens[]=pipe.split(snpeff.substring(opar+1,cpar));
-						List<String> h=new ArrayList<String>();
-						h.add("Effect");
-						h.add(snpeff.substring(0,opar));
-						for(int t=0;t<tokens.length && t<snpEffColumns.length;++t)
-							{
-							if(tokens[t].isEmpty()) continue;
-							h.add(snpEffColumns[t]);
-							h.add(tokens[t]);
-							}
-						insertExtraInfos(key, h);	
-						}
-					}
-				
-				if(key.equals("NMD") && nmdColumns!=null)
-					{
-					
-					for(Object item:castToStringArray(val))
-						{
-						String nmd=item.toString();
-						if(nmd.isEmpty()) continue;
-						String tokens[]=pipe.split(nmd);
-						List<String> h=new ArrayList<String>(nmdColumns.length*2);
-						for(int t=0;t<tokens.length && t<nmdColumns.length;++t)
-							{
-							if(tokens[t].isEmpty()) continue;
-							h.add(nmdColumns[t]);
-							h.add(tokens[t]);
-							}
-						insertExtraInfos(key, h);
-						}	
-					}
-				
-				if(key.equals("LOF") && lofColumns!=null)
-					{
-					
-					for(Object item:castToStringArray(val))
-						{
-						String lof=item.toString();
-						if(lof.isEmpty()) continue;
-						String tokens[]=pipe.split(lof);
-						List<String> h=new ArrayList<String>(lofColumns.length*2);
-						for(int t=0;t<tokens.length && t<lofColumns.length;++t)
-							{
-							if(tokens[t].isEmpty()) continue;
-							h.add(lofColumns[t]);
-							h.add(tokens[t]);
-							}
-						insertExtraInfos(key, h);
-						}	
-					}
-				
-				
-				}
-			GenotypesContext genotypesCtx =var.getGenotypes();
-			for(Genotype g:genotypesCtx)
-				{
-				//"create table if not exists GENOTYPE(id,var_id,k,v)";
-				
-				List<Allele> alleles=g.getAlleles();
-				
-				out.println(
-						"insert into GENOTYPE"+SUFFIX+
-						"(var_id,sample_id,A1,A2,dp,ad,gq,pl," +
-						"is_phased,is_hom,is_homref,is_homvar,is_mixed," +
-						"is_nocall,is_noninformative,is_available,is_called,is_filtered"+
-						") values ("+
-						"(select max(id) from VARIATION"+SUFFIX+"),"+
-						"(select id from SAMPLE"+SUFFIX+" where name="+quote(g.getSampleName())+"),"+
-						(alleles.size()==2?quote(alleles.get(0).getBaseString()):"NULL")+","+
-						(alleles.size()==2?quote(alleles.get(1).getBaseString()):"NULL")+","+
-						(g.hasDP()?g.getDP():"NULL")+","+
-						(g.hasAD()?quote(infotoString(g.getAD())):"NULL")+","+
-						(g.hasGQ()?g.getGQ():"NULL")+","+
-						(g.hasPL()?quote(infotoString(g.getPL())):"NULL")+","+
-						(g.isPhased()?1:0)+","+
-						(g.isHom()?1:0)+","+
-						(g.isHomRef()?1:0)+","+
-						(g.isHomVar()?1:0)+","+
-						(g.isMixed()?1:0)+","+
-						(g.isNoCall()?1:0)+","+
-						(g.isNonInformative()?1:0)+","+
-						(g.isAvailable()?1:0)+","+
-						(g.isCalled()?1:0)+","+
-						(g.isFiltered()?1:0)+");"
-						);
-				
-				for(String key:g.getExtendedAttributes().keySet())
-					{
-					Object val=g.getExtendedAttribute(key);
-					if(val==null) continue;
-					out.println(
-							"insert into GTPROP"+SUFFIX+"(genotype_id,k,v) values ("+
-							"(select max(id) from GENOTYPE"+SUFFIX+"),"+
-							quote(key)+","+
-							quote(infotoString(val))+");"
-							);
-					}
-
-				}
-			
-			}
-		
-		}
-	
-	private String quote(String s)
-		{
-		if(s==null) return "NULL";
-		StringBuilder b=new StringBuilder();
-		b.append("\'");
-		for(int i=0;i<s.length();++i)
-			{
-			char c=s.charAt(i);
-			switch(c)
-				{
-				case '\'': b.append("''"); break;
-				default: b.append(c); break;
-				}
-			}
-		b.append("\'");
-		return b.toString();
-		}
-	private void insertExtraInfos(String type,List<String> h)
-		{
-		boolean first=true;
-		for(int i=0;i+1< h.size();i+=2)
-			{			
-			if(h.get(i+1).isEmpty()) continue;
-			if(first)
-				{
-				
-				out.println(
-						"insert into EXTRAINFO"+SUFFIX+"(info_id,type) values ("+
-						"(select max(id) from INFO"+SUFFIX+"),"+
-						quote(type)+
-						");"
-						);
-				first=false;
-	
-				}
-			
-			out.println(
-					"insert into EXTRAINFOPROP"+SUFFIX+"(extrainfo_id,k,v) values ("+
-					"(select max(id) from EXTRAINFO"+SUFFIX+"),"+
-					quote(h.get(i))+","+
-					quote(h.get(i+1))+");"
+				this.variant2altTable.insert(
+					outputWriter,
+					null,
+					variant_id,
+					new SelectStmt(this.alleleTable, "bases", alt.getBaseString())
 					);
-			}
+				}
 
+			/* insert filters */
+			for(final String filter:var.getFilters())
+				{
+				if(filter2filterid.get(filter)==null)
+					{
+					throw new IOException("VCF Error: filter "+filter+" is not defined in the VCF header.");
+					}
+				this.variant2filters.insert(
+					outputWriter,
+					null,
+					variant_id,
+					filter2filterid.get(filter)
+					);
+				}
+			
+			if(!this.ignore_info)
+				{
+				for(final VepPrediction pred: vepPredictionParser.getPredictions(var))
+					{
+					/*
+					vepPrediction.insert(
+							outputWriter,
+							null,
+							variant_id,
+							pred.getEnsemblGene(),
+							pred.getEnsemblTranscript(),
+							pred.getEnsemblProtein(),
+							pred.getSymbol()
+							);
+					SelectStmt pred_id = new SelectStmt(vepPrediction);
+			
+					for(SequenceOntologyTree.Term t: pred.getSOTerms())
+						{
+						String term=t.getAcn().replace(':', '_');
+						soTermTable.insert(
+								outputWriter,
+								null,
+								term,
+								t.getAcn()
+								);//for bioportal compatibility
+						SelectStmt term_id = new SelectStmt(soTermTable,"acn",term);
+						
+						vepPrediction2so.insert(
+							outputWriter,
+							null,
+							pred_id,
+							term_id
+							);
+						}
+					*/
+					}
+				}
+			
+			/* insert genotypes */
+			for(final String sampleName: sample2sampleid.keySet())
+				{
+				final Genotype g= var.getGenotype(sampleName);
+				
+				if(!g.isAvailable() || g.isNoCall()) continue;
+				genotypeTable.insert(
+						outputWriter,
+						null,
+						variant_id,
+						sample2sampleid.get(sampleName),
+						g.isCalled()?new SelectStmt(this.alleleTable, "bases", g.getAllele(0).getBaseString()):null,
+						g.isCalled()?new SelectStmt(this.alleleTable, "bases", g.getAllele(1).getBaseString()):null,
+						g.hasDP()?g.getDP():null,
+						g.hasGQ()?g.getGQ():null	
+						);
+				}
+			
+			}
+		r.close();
 		}
 	
-	@SuppressWarnings("unchecked")
-	private List castToStringArray(Object val)
-		{
-		if(val instanceof List)
+    
+	@Override
+	public int doWork(final List<String> args) {
+		try
 			{
-			return (List)val;
-			}
-		else
-			{
-			return new ArrayList(Collections.singleton(val.toString()));
-			}
-		}
-	private String infotoString(Object o)
-		{
-		if(o instanceof int[])
-			{
-			int array[]=(int[])o;
-			StringBuilder b=new StringBuilder();
-			for(int i=0;i< array.length;++i)
+			if(this.print_schema)
 				{
-				if(i>0) b.append(",");
-				b.append(infotoString(array[i]));
+				this.outputWriter =  this.openFileOrStdoutAsPrintWriter(this.outputFile);
+				
+				this.outputWriter.println("digraph G{");
+				for(int i=0;i< this.all_tables.length;++i)
+					{
+					this.outputWriter.println(this.all_tables[i].getName()+";");
+					}
+				for(int i=0;i< this.all_tables.length;++i)
+					{
+					for(Column c2:this.all_tables[i].columns)
+						{
+						if(!(c2 instanceof ForeignKey)) continue;
+						ForeignKey fk=ForeignKey.class.cast(c2);
+						this.outputWriter.println(
+								this.all_tables[i].getName()+
+								" -> "+
+								fk.referencesTable.getName()+
+								"[label="+fk.name+"];"
+								);
+						}
+					}
+				this.outputWriter.println("}");
+				this.outputWriter.flush();
+				this.outputWriter.close();
+				return RETURN_OK;
 				}
-			return b.toString();
-			}
-		if(o instanceof List)
-			{
-			List<?> L=List.class.cast(o);
-			StringBuilder b=new StringBuilder();
-			for(int i=0;i< L.size();++i)
+			
+			//final String inputName=;
+			final File filename=new File( oneAndOnlyOneFile(args));
+			
+			this.outputWriter =  this.openFileOrStdoutAsPrintWriter(this.outputFile);
+			
+			if(this.drop_tables)
 				{
-				if(i>0) b.append(",");
-				b.append(infotoString(L.get(i)));
+				for(int i=this.all_tables.length-1;i>=0;--i)
+					{
+		    		this.outputWriter.println("DROP TABLE IF EXISTS "+all_tables[i].getAntiquote()+";");
+	
+					}
 				}
-			return b.toString();
+			this.outputWriter.println("START TRANSACTION;");
+			this.outputWriter.println("SET autocommit=0;");
+			for(Table t:this.all_tables)
+				{
+				t.createTable(outputWriter);
+				}
+			
+			read(filename);
+			
+			this.outputWriter.println("COMMIT;");
+			this.outputWriter.flush();
+			this.outputWriter.close();
+			this.outputWriter=null;
+			LOG.info("done");
+			return RETURN_OK;
 			}
-		return o.toString();
+		catch(final Exception err)
+			{
+			LOG.error(err);
+			return -1;
+			}
+		finally
+			{
+			CloserUtil.close(this.outputWriter);
+			}
 		}
-	private void insertIntoInfo(String key,String val)
-		{
-		out.println(
-				"insert into INFO"+SUFFIX+"(var_id,k,v) values ("+
-				"(select max(id) from VARIATION"+SUFFIX+"),"+
-				key+","+
-				val+");"
-				);
-		}
+    
 
-	public static void main(String[] args)
+
+	public static void main(final String[] args)
 		{
 		new VcfToSql().instanceMainWithExit(args);
 		}

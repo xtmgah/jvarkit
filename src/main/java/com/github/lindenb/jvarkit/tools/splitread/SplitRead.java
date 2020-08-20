@@ -1,30 +1,41 @@
 package com.github.lindenb.jvarkit.tools.splitread;
 
 import java.io.File;
+import java.io.PrintStream;
 import java.util.Iterator;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.util.List;
 
-import com.github.lindenb.jvarkit.util.picard.BWAUtils;
+import com.beust.jcommander.Parameter;
+import com.github.lindenb.jvarkit.util.jcommander.Launcher;
+import com.github.lindenb.jvarkit.util.jcommander.Program;
+import com.github.lindenb.jvarkit.util.log.Logger;
 
-import net.sf.samtools.Cigar;
-import net.sf.samtools.CigarElement;
-import net.sf.samtools.SAMFileReader;
-import net.sf.samtools.SAMRecord;
-import net.sf.samtools.SAMFileReader.ValidationStringency;
+import htsjdk.samtools.Cigar;
+import htsjdk.samtools.CigarElement;
+import htsjdk.samtools.SamReader;
+import htsjdk.samtools.util.CloserUtil;
+import htsjdk.samtools.SAMRecord;
+import htsjdk.samtools.SAMUtils;
 
-public class SplitRead {
-	private static final Logger LOG=Logger.getLogger(SplitRead.class.getSimpleName());
+@Program(name="splitread",
+	description="TODO",keywords={"sam","bam"},generate_doc=false)
+public class SplitRead extends Launcher{
+	private static final Logger LOG=Logger.build(SplitRead.class).make();
+    @Parameter(names={"-o","--output"},description=OPT_OUPUT_FILE_OR_STDOUT)
+    private File outputFile = null;
+
+    private PrintStream out=null;
 	private float maxFractionCommon=0.1f;
 	
 	private class Fragment
+		implements Comparable<Fragment>
 		{
 		String chrom;
 		int pos;
 		char strand;
 		String cigar;
 		
-		public int compareTo(Fragment other)
+		@Override public int compareTo(final Fragment other)
 			{
 			int i=chrom.compareTo(other.chrom);
 			if(i!=0) return i;
@@ -33,7 +44,7 @@ public class SplitRead {
 		
 		void print()
 			{
-			System.out.print(chrom+"\t"+pos+"\t"+strand+"\t"+cigar);
+			SplitRead.this.out.print(chrom+"\t"+pos+"\t"+strand+"\t"+cigar);
 			}
 		}
 	
@@ -41,13 +52,13 @@ public class SplitRead {
 	private void scanRecord(final SAMRecord record) throws Exception
 		{
 		if(record.getReadUnmappedFlag()) return;
-		String xp=record.getStringAttribute("XP");
-		if(xp==null) return;
-		LOG.info(xp);
+		final List<SAMRecord> xpAlnList = SAMUtils.getOtherCanonicalAlignments(record);
+		if(xpAlnList.isEmpty()) return;
 		Cigar cigar1=record.getCigar();
 		int readPos=0;
-		int readMap1[]=new int[record.getReadLength()];
-		for(CigarElement ce:cigar1.getCigarElements())
+		// positions in the reads that are mapped by the cigar string
+		final int readMap1[]=new int[record.getReadLength()];
+		for(final CigarElement ce:cigar1.getCigarElements())
 			{
 			switch(ce.getOperator())
 				{
@@ -69,13 +80,12 @@ public class SplitRead {
 				default: throw new RuntimeException("cigar operator not handled:"+ce.getOperator());
 				}
 			}
-		
-		for(BWAUtils.XPAlign xpAln:BWAUtils.getXPAligns(record))
+		// lopp over alternate reads
+		for(final SAMRecord xpAln:xpAlnList)
 			{
-			
 			readPos=0;
 			float common=0f;
-			for(CigarElement ce:xpAln.getCigarElements())
+			for(final CigarElement ce:xpAln.getCigar())
 				{
 				switch(ce.getOperator())
 					{
@@ -86,9 +96,11 @@ public class SplitRead {
 						}
 					case M:case X:case EQ:
 						{
+						//get the common region between the main alignemt and the
+						// this canonical align
 						for(int i=0;i< ce.getLength();++i)
 							{
-							if(readMap1[readPos]==1)
+							if(readMap1[readPos]==1)//was in main align
 								{
 								common++;
 								}
@@ -107,40 +119,40 @@ public class SplitRead {
 				}
 
 			
-			Fragment f1=new Fragment();
+			final Fragment f1=new Fragment();
 			f1.chrom=record.getReferenceName();
 			f1.pos=record.getAlignmentStart();
 			f1.strand=(record.getReadNegativeStrandFlag()?'-':'+');
 			f1.cigar=record.getCigarString();
 			
-			Fragment f2=new Fragment();
-			f2.chrom=xpAln.getChrom();
-			f2.pos=xpAln.getPos();
-			f2.strand=xpAln.getStrand();
+			final Fragment f2=new Fragment();
+			f2.chrom=xpAln.getReferenceName();
+			f2.pos=xpAln.getAlignmentStart();
+			f2.strand=xpAln.getReadNegativeStrandFlag()?'-':'+';
 			f2.cigar=xpAln.getCigarString();
 
-			System.out.print(
+			this.out.print(
 				record.getReadName()+"\t"+
 				(record.getFirstOfPairFlag()?'F':'R')+"\t"
 				);
 			if(f1.compareTo(f2)<0)
 				{
 				f1.print();
-				System.out.print("\t");
+				this.out.print("\t");
 				f2.print();
 				}
 			else
 				{
 				f2.print();
-				System.out.print("\t");
+				this.out.print("\t");
 				f1.print();
 				}	
-			System.out.println("\t"+fraction);
+			this.out.println("\t"+fraction);
 			}
 		}
 	
 
-	private void scan(SAMFileReader reader) throws Exception
+	private void scan(final SamReader reader) throws Exception
 		{
 		long nrecords=0L;
 		for(Iterator<SAMRecord> iter=reader.iterator();
@@ -157,74 +169,32 @@ public class SplitRead {
 			}
 		}
 	
-	
-	private void run(String[] args)
-		throws Exception
-		{
+	@Override
+	public int doWork(final List<String> args) {		
 		
-		int optind=0;
-		while(optind< args.length)
+		try
 			{
-			if(args[optind].equals("-h") ||
-			   args[optind].equals("-help") ||
-			   args[optind].equals("--help"))
-				{
-				System.err.println("Pierre Lindenbaum PhD. 2013");
-				System.err.println("Options:");
-				System.err.println(" -h help; This screen.");
-				System.err.println(" -R (reference file) REQUIRED.");
-				System.err.println(" -L|--level (log level): default:"+LOG.getLevel());
-;
-				}
-			
-			else if((args[optind].equals("-L") || args[optind].equals("--level")) && optind+1< args.length)
-				{
-				LOG.setLevel(Level.parse(args[++optind]));
-				}
-
-			else if(args[optind].equals("--"))
-				{
-				optind++;
-				break;
-				}
-			else if(args[optind].startsWith("-"))
-				{
-				System.err.println("Unknown option "+args[optind]);
-				return;
-				}
-			else 
-				{
-				break;
-				}
-			++optind;
+			this.out = openFileOrStdoutAsPrintStream(this.outputFile);
+			scan(super.openSamReader(oneFileOrNull(args)));
+			this.out.flush();
+			this.out.close();
+			this.out=null;
+			return 0;
 			}
-		
-		SAMFileReader.setDefaultValidationStringency(ValidationStringency.LENIENT);
-		
-		if(optind==args.length)
+		catch(final Exception err)
 			{
-			SAMFileReader r=new SAMFileReader(System.in);
-			scan(r);
-			r.close();
+			LOG.error(err);
+			return -1;
 			}
-		else if(optind+1==args.length)
+		finally
 			{
-			File file=new File(args[optind++]); 
-			SAMFileReader r=new SAMFileReader(file);
-			scan(r);
-			r.close();
-			}
-		else 
-			{
-			System.err.println("illegal number of arguments.");
-			System.exit(-1);
+			CloserUtil.close(out);
 			}
 		}
 		
 	public static void main(String[] args) throws Exception
 		{
-		LOG.setLevel(Level.OFF);
-		new SplitRead().run(args);
+		new SplitRead().instanceMainWithExit(args);
 		}
 	
 	}

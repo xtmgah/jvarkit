@@ -1,188 +1,221 @@
+/*
+The MIT License (MIT)
+
+Copyright (c) 2020 Pierre Lindenbaum
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+*/
 package com.github.lindenb.jvarkit.tools.samjs;
 
+
+
+import java.io.File;
 
 /**
  * Author: Pierre Lindenbaum PhD. @yokofakun
  * Motivation http://www.biostars.org/p/66319/ 
  */
 
-import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
-import java.util.Iterator;
+import java.util.List;
 
 import javax.script.Bindings;
-import javax.script.Compilable;
 import javax.script.CompiledScript;
-import javax.script.ScriptEngine;
-import javax.script.ScriptEngineManager;
+
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.ParametersDelegate;
+import com.github.lindenb.jvarkit.util.jcommander.Launcher;
+import com.github.lindenb.jvarkit.util.jcommander.Program;
+import com.github.lindenb.jvarkit.util.log.Logger;
+import com.github.lindenb.jvarkit.util.picard.SAMSequenceDictionaryProgress;
+
+import htsjdk.samtools.SAMFileHeader;
+import htsjdk.samtools.SAMFileWriter;
+import htsjdk.samtools.SAMRecord;
+import htsjdk.samtools.SAMRecordIterator;
+import htsjdk.samtools.SamReader;
+import htsjdk.samtools.util.CloserUtil;
+
+/**
+BEGIN_DOC
+
+## Motivation
+
+Filters a BAM using javascript( java nashorn engine).
+
+For each read the script injects in the context the following values:
 
 
-import net.sf.picard.cmdline.CommandLineProgram;
-import net.sf.picard.cmdline.Option;
-import net.sf.picard.cmdline.StandardOptionDefinitions;
-import net.sf.picard.cmdline.Usage;
-import net.sf.picard.util.Log;
-import net.sf.samtools.SAMFileHeader;
-import net.sf.samtools.SAMFileReader;
-import net.sf.samtools.SAMFileWriter;
-import net.sf.samtools.SAMFileWriterFactory;
-import net.sf.samtools.SAMRecord;
+* **'record'** a SamRecord  [https://samtools.github.io/htsjdk/javadoc/htsjdk/htsjdk/samtools/SAMRecord.html](https://samtools.github.io/htsjdk/javadoc/htsjdk/htsjdk/samtools/SAMRecord.html)
+* **'header'** a SAMFileHeader  [https://samtools.github.io/htsjdk/javadoc/htsjdk/htsjdk/samtools/SAMFileHeader.html](https://samtools.github.io/htsjdk/javadoc/htsjdk/htsjdk/samtools/SAMFileHeader.html)
 
 
+the script should return a boolean : true accept the read, false: discard the read.
 
-public class SamJavascript extends CommandLineProgram
+## Example
+
+### Example 1
+
+
+get a SAM where the  read OR the mate is unmapped
+
+```bash
+java -jar dist/samjs.jar  \
+	-e "record.readUnmappedFlag || record.mateUnmappedFlag;" \
+	ex1.bam
+
+@HD	VN:1.4	SO:unsorted
+@SQ	SN:seq1	LN:1575
+@SQ	SN:seq2	LN:1584
+B7_591:4:96:693:509	73	seq1	1	99	36M	*	0	0	CACTAGTGGCTCATTGTAAATGTGTGGTTTAACTCG	<<<<<<<<<<<<<<<;<<<<<<<<<5<<<<<;:<;7	H0:i:1	H1:i:0	MF:i:18	NM:i:0	UQ:i:0	Aq:i:73
+EAS54_65:7:152:368:113	73	seq1	3	99	35M	*	0	0	CTAGTGGCTCATTGTAAATGTGTGGTTTAACTCGT	<<<<<<<<<<0<<<<655<<7<<<:9<<3/:<6):H0:i:1	H1:i:0	MF:i:18	NM:i:0	UQ:i:0	Aq:i:66
+EAS51_64:8:5:734:57	137	seq1	5	99	35M	*	0	0	AGTGGCTCATTGTAAATGTGTGGTTTAACTCGTCC	<<<<<<<<<<<7;71<<;<;;<7;<<3;);3*8/5H0:i:1	H1:i:0	MF:i:18	NM:i:0	UQ:i:0	Aq:i:66
+B7_591:1:289:587:906	137	seq1	6	63	36M	*	0	0	GTGGCTCATTGTAATTTTTTGTTTTAACTCTTCTCT	(-&----,----)-)-),'--)---',+-,),''*,	H0:i:0	H1:i:0	MF:i:130	NM:i:5	UQ:i:38	Aq:i:63
+EAS56_59:8:38:671:758	137	seq1	9	99	35M	*	0	0	GCTCATTGTAAATGTGTGGTTTAACTCGTCCATGG	<<<<<<<<<<<<<<<;<;7<<<<<<<<7<<;:<5%H0:i:1	H1:i:0	MF:i:18	NM:i:0	UQ:i:0	Aq:i:72
+EAS56_61:6:18:467:281	73	seq1	13	99	35M	*	0	0	ATTGTAAATGTGTGGTTTAACTCGTCCCTGGCCCA	<<<<<<<<;<<<8<<<<<;8:;6/686&;(16666H0:i:0	H1:i:1	MF:i:18	NM:i:1	UQ:i:5	Aq:i:39
+EAS114_28:5:296:340:699	137	seq1	13	99	36M	*	0	0	ATTGTAAATGTGTGGTTTAACTCGTCCATGGCCCAG	<<<<<;<<<;<;<<<<<<<<<<<8<8<3<8;<;<0;	H0:i:1	H1:i:0	MF:i:18	NM:i:0	UQ:i:0	Aq:i:73
+B7_597:6:194:894:408	73	seq1	15	99	35M	*	0	0	TGTAAATGTGTGGTTTAACTCGTCCATTGCCCAGC	<<<<<<<<<7<<;<<<<;<<<7;;<<<*,;;572<H0:i:0	H1:i:1	MF:i:18	NM:i:1	UQ:i:9	Aq:i:43
+EAS188_4:8:12:628:973	89	seq1	18	75	35M	*	0	0	AAATGTGTGGTTTAACTCGTCCATGGCCCAGCATT	==;=:;:;;:====;=;===:=======;==;===H0:i:1	H1:i:0	MF:i:64	NM:i:0	UQ:i:0	Aq:i:0
+(...)
+```
+
+### Example 2
+
+remove reads with indels:
+
+```
+java -jar dist/samjs.jar -e 'function accept(r) { if(r.getReadUnmappedFlag()) return false; var cigar=r.getCigar();if(cigar==null) return false; for(var i=0;i< cigar.numCigarElements();++i) {if(cigar.getCigarElement(i).getOperator().isIndelOrSkippedRegion()) return false; } return true;} accept(record);' input.bam
+```
+
+
+## Cited in
+
+  *  "Nanopore Targeted Sequencing for Rapid Gene Mutations Detection in Acute Myeloid Leukemia "  Genes 2019, 10(12), 1026; https://doi.org/10.3390/genes10121026  
+
+END_DOC
+*/
+@Program(name="samjs",
+	description="Filters a BAM using a javascript expression ( java nashorn engine  ).",
+	keywords={"sam","bam","nashorn","javascript","filter"},
+	biostars={75168,81750,75354,77802,103052,106900,150530,253774,256615},
+	references="\"bioalcidae, samjs and vcffilterjs: object-oriented formatters and filters for bioinformatics files\" . Bioinformatics, 2017. Pierre Lindenbaum & Richard Redon  [https://doi.org/10.1093/bioinformatics/btx734](https://doi.org/10.1093/bioinformatics/btx734)."
+	)
+public class SamJavascript
+	extends Launcher
 	{
-	private static final Log LOG=Log.getInstance(SamJavascript.class);
-	@Usage(programVersion="1.0")
-	public String USAGE=getStandardUsagePreamble()+"Filters a BAM using javascript( java rhino engine)." +
-			"The script puts 'record' a SamRecord (http://picard.sourceforge.net/javadoc/net/sf/samtools/SAMRecord.html)  " +
-			" and 'header' ( http://picard.sourceforge.net/javadoc/net/sf/samtools/SAMFileHeader.html) in the script context .";
-    
-	@Option(shortName= StandardOptionDefinitions.INPUT_SHORT_NAME, doc="BAM file to process. Default stdin. ",optional=true)
-	public File IN=null;
-	@Option(shortName= StandardOptionDefinitions.OUTPUT_SHORT_NAME, doc="output filename. Default stdout. ",optional=true)
-	public File OUT=null;
-	@Option(shortName="SF", doc="javascript file ",optional=true)
-	public File SCRIPT_FILE=null;
-	@Option(shortName="SE", doc="javascript expression ",optional=true)
-	public String SCRIPT_EXPRESSION=null;
-	@Option(shortName="SAM",doc="sam output ",optional=true)
-	public boolean SAM_OUTPUT=false;
-	@Option(shortName="L",doc="limit to 'L' records. ",optional=true)
-	public Long LIMIT=null;
-	
-	
-	
-	private CompiledScript  script=null;
-	private ScriptEngine engine=null;
-	
-	@Override
-	public String getVersion() {
-		return "1.0";
-		}
-	
-	private void scan(SAMFileReader samFileReader) throws Exception
-		{
-		
-		long count=0;
-		
-		samFileReader.setValidationStringency(super.VALIDATION_STRINGENCY);
-		SAMFileHeader header=samFileReader.getFileHeader();
-		
-		
-        SAMFileWriterFactory sf=new SAMFileWriterFactory();
-        sf.setCreateIndex(false);
-        File stdout=(OUT==null?new File("/dev/stdout"):OUT);
-     	
-        SAMFileWriter sw=null;
-        if(!SAM_OUTPUT )
-        	{
-        	if(!stdout.exists() && OUT==null) //stdout
-				{
-        		samFileReader.close();
-				throw new IOException("Cannot save as BAM because "+stdout+" doesn't exist. Please use SAM.");
-				}
-        	sw=sf.makeBAMWriter(header,false,stdout);        
-        	}
-        else if(OUT==null)
-        	{
-        	sw=sf.makeSAMWriter(header,false,System.out);        
-        	}
-		else
-			{
-			sw=sf.makeSAMWriter(header,false,OUT);
-			}
+	private static final Logger LOG = Logger.build(SamJavascript.class).make();
 
-        Bindings bindings = this.engine.createBindings();
-        bindings.put("header", header);
-       
-        
-		for(Iterator<SAMRecord> iter=samFileReader.iterator();
-				iter.hasNext(); )
-			{
-			SAMRecord record=iter.next();
-			bindings.put("record", record);
-			Object result = script.eval(bindings);
-			if(result==null) continue;
-			
-			if(result instanceof Boolean)
-				{
-				if(Boolean.FALSE.equals(result)) continue;
-				}
-			else if(result instanceof Number)
-				{
-				if(((Number)result).intValue()!=1) continue;
-				}
-			else
-				{
-				LOG.info("script returned neither a number or a boolean "+result.getClass());
-				continue;
-				}
-			++count;
-			sw.addAlignment(record);
-			if(this.LIMIT!=null && count>=this.LIMIT) break;
-			}
-		sw.close();
-		}
-	
-	@Override
-	public int doWork()
+	@Parameter(names={"-o","--output"},description=OPT_OUPUT_FILE_OR_STDOUT)
+	private File outputFile = null;
+
+
+	@Parameter(names={"-X","--fail"},description="Save dicarded reads in that file")
+	private File failingReadsFile = null;
+
+	@Parameter(names={"-N","--limit"},description="limit to 'N' records (for debugging).")
+	private long LIMIT = -1L ;
+
+	@ParametersDelegate
+	private WritingBamArgs writingBamArgs = new WritingBamArgs();
+
+	@Parameter(names={"-e","--expression"},description="javascript expression")
+	private String jsExpression=null;
+	@Parameter(names={"-f","--file"},description="javascript file")
+	private File jsFile =null;
+	private CompiledScript  script=null;
+	private SAMFileWriter failingReadsWriter=null;
+
+	public SamJavascript()
 		{
-		try {
-			if(SCRIPT_EXPRESSION==null && SCRIPT_FILE==null)
+		}
+
+	/* open failing bam if it was not already open */
+	private void openFailing(final SAMFileHeader h)
+		{
+		if(this.failingReadsFile==null) return;
+		if(this.failingReadsWriter==null)
+			{
+			LOG.info("Writing failings to "+ this.failingReadsFile);
+			final SAMFileHeader h2= h.clone();
+			this.failingReadsWriter=this.writingBamArgs.openSAMFileWriter(failingReadsFile, h2,true);
+			}
+		}
+
+	private void failing(final SAMRecord rec,final SAMFileHeader h)
+		{
+		openFailing(h);
+		if(failingReadsWriter!=null) failingReadsWriter.addAlignment(rec);
+		}
+
+	@Override
+	public int doWork(final List<String> args) {
+		SAMRecordIterator iter=null;
+		SamReader samFileReader=null;
+		SAMFileWriter sw=null;
+		try
+			{
+			this.script  = super.compileJavascript(this.jsExpression,this.jsFile);
+			samFileReader= openSamReader(oneFileOrNull(args));
+			final SAMFileHeader header=samFileReader.getFileHeader();
+			sw = writingBamArgs.openSAMFileWriter(outputFile,header, true);
+			long count=0L;
+	        	final Bindings bindings = this.script.getEngine().createBindings();
+		        bindings.put("header", samFileReader.getFileHeader());
+		        final SAMSequenceDictionaryProgress progress=new SAMSequenceDictionaryProgress(header).logger(LOG);
+		        iter = samFileReader.iterator();
+			while(iter.hasNext())
 				{
-				LOG.error("undefined script");
-				return -1;
+				final SAMRecord record=iter.next();
+				progress.watch(record);
+				bindings.put("record", record);
+				if(super.evalJavaScriptBoolean(this.script, bindings))
+					{
+					++count;
+					sw.addAlignment(record);
+					if(this.LIMIT>0L && count>=this.LIMIT) break;
+					}
+				else
+					{
+					failing(record,header);
+					}
 				}
-			
-			ScriptEngineManager manager = new ScriptEngineManager();
-			this.engine = manager.getEngineByName("js");
-			if(this.engine==null)
-				{
-				LOG.error("not available: javascript. Use the SUN/Oracle JDK ?");
-				return -1;
-				}
-			
-			Compilable compilingEngine = (Compilable)this.engine;
-			this.script = null;
-			if(SCRIPT_FILE!=null)
-				{
-				FileReader r=new FileReader(SCRIPT_FILE);
-				this.script=compilingEngine.compile(r);
-				r.close();
-				}
-			else
-				{
-				this.script=compilingEngine.compile(SCRIPT_EXPRESSION);
-				}
-			
-			if(IN==null)
-				{
-				SAMFileReader samFileReader=new SAMFileReader(System.in);
-				scan(samFileReader);
-				samFileReader.close();
-				}
-			else
-				{
-				SAMFileReader samFileReader=new SAMFileReader(IN);
-				scan(samFileReader);
-				samFileReader.close();
-				}
-			
-			return 0;
-			
-		} catch (Exception e) {
-			LOG.error(e);
+			sw.close();
+			/* create empty if never called */
+			openFailing(header);
+			return RETURN_OK;
+			}
+		catch(final Exception err)
+			{
+			LOG.error(err);
 			return -1;
 			}
+		finally
+			{
+			CloserUtil.close(iter);
+			CloserUtil.close(samFileReader);
+			CloserUtil.close(sw);
+			CloserUtil.close(failingReadsWriter);
+			}
 		}
-	
 
-		
 	public static void main(String[] args) throws Exception
 		{
 		new SamJavascript().instanceMainWithExit(args);
 		}
-	
 	}

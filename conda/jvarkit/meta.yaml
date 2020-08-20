@@ -1,0 +1,19 @@
+package:
+  name: jvarkit
+  version: v20200206
+
+source:
+   url: https://github.com/lindenb/jvarkit/archive/v20200206.zip
+   md5: b0e3bc720065f051508d7ac3adfc9899
+
+requirements:
+  build:
+    - openjdk >=8.0
+  run:
+    - openjdk >=8.0
+
+
+about:
+  summary: jvarkit "Java utilities for Bioinformatics"
+  home: https://github.com/lindenb/jvarkit
+  license : MIT

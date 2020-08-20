@@ -1,320 +1,741 @@
+/*
+The MIT License (MIT)
+
+Copyright (c) 2020 Pierre Lindenbaum
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+*/
 package com.github.lindenb.jvarkit.tools.cmpbams;
-import java.io.File;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.Iterator;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
-import java.util.logging.Logger;
+import java.util.TreeSet;
 
-import net.sf.samtools.SAMFileReader;
-import net.sf.samtools.SAMFileReader.ValidationStringency;
-import net.sf.samtools.SAMRecord;
-import net.sf.samtools.SAMSequenceDictionary;
-import net.sf.samtools.SAMSequenceRecord;
+import com.beust.jcommander.Parameter;
+import com.beust.jcommander.ParametersDelegate;
+import com.github.lindenb.jvarkit.io.IOUtils;
+import com.github.lindenb.jvarkit.lang.StringUtils;
+import com.github.lindenb.jvarkit.samtools.util.IntervalParserFactory;
+import com.github.lindenb.jvarkit.samtools.util.SimpleInterval;
+import com.github.lindenb.jvarkit.util.jcommander.Launcher;
+import com.github.lindenb.jvarkit.util.jcommander.Program;
+import com.github.lindenb.jvarkit.util.log.Logger;
+import com.github.lindenb.jvarkit.util.log.ProgressFactory;
+import com.github.lindenb.jvarkit.util.picard.AbstractDataCodec;
 
-import com.sleepycat.bind.tuple.StringBinding;
-import com.sleepycat.bind.tuple.TupleInput;
-import com.sleepycat.bind.tuple.TupleOutput;
-import com.sleepycat.je.Cursor;
-import com.sleepycat.je.Database;
-import com.sleepycat.je.DatabaseConfig;
-import com.sleepycat.je.DatabaseEntry;
-import com.sleepycat.je.Environment;
-import com.sleepycat.je.EnvironmentConfig;
-import com.sleepycat.je.LockMode;
-import com.sleepycat.je.OperationStatus;
-import com.sleepycat.je.Transaction;
+import htsjdk.samtools.SamReader;
+import htsjdk.samtools.SAMRecord;
+import htsjdk.samtools.SAMRecordIterator;
+import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.samtools.SAMSequenceRecord;
+import htsjdk.samtools.util.CloseableIterator;
+import htsjdk.samtools.util.CloserUtil;
+import htsjdk.samtools.util.SequenceUtil;
+import htsjdk.samtools.util.SortingCollection;
+/*
+BEGIN_DOC
 
-public class CompareBams {
-	private static final Logger LOG=Logger.getLogger(CompareBams.class.getName());
-	private static final String DATABASENAME="read2pos";
-	private File dbHome;
-	private Environment environment=null;
-	private Database database=null;
-	private Transaction txn;
-	private int countBams;
-	private boolean useSamFlag=false;
+## Example
+
+Question was : "mapping with BWA produced a variation one year ago. We then mapped the same fastq with two different sets of parameters, but we cannot find the variant anymore. Has the mapping changed ?"
+
+Extract the read names from the original BAM:
+```
+samtools view  file1.bam K01:2179-2179 |\
+ cut -d '	' -f 1  | sort | uniq > names.txt
+```
+ 
+Use [[SamGrep]] to retieve the reads in the 3 bams:
+
+```
+java -jar dist/samgrep.jar -f names.txt file1.bam &gt; tmp1.sam
+java -jar dist/samgrep.jar -f names.txt file2.bam &gt; tmp2.sam
+java -jar dist/samgrep.jar -f names.txt file3.bam &gt; tmp3.sam
+```
+
+Run CmpBams
+
+```
+$ java -jar dist/cmpbams.jar -F -C tmp1.sam tmp2.sam tmp3.sam
+
+#READ-Name	tmp1.sam tmp2.sam|tmp1.sam tmp3.sam|tmp2.sam tmp3.sam	tmp1.sam	tmp2.sam	tmp3.sam
+HWI-1KL149:20:C1CU7ACXX:1:1101:17626:32431/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:1:1101:17626:32431/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1102:16831:71728/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1102:16831:71728/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1105:3309:27760/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1105:3309:27760/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1106:2914:12111/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:1:1106:2914:12111/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1107:11589:17295/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:1:1107:11589:17295/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1110:14096:95943/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:1:1110:14096:95943/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1110:15369:59046/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1110:15369:59046/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1111:8599:97362/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1111:8599:97362/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1113:10490:30873/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1113:10490:30873/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1113:12360:36316/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1113:12360:36316/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1113:4589:62685/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:1:1113:4589:62685/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1115:7288:99676/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1115:7288:99676/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1116:8136:52921/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1116:8136:52921/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1202:11809:66877/1	EQ|EQ|EQ	K01:2104=83/100M	K01:2104=83/100M	K01:2104=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1202:11809:66877/2	EQ|EQ|EQ	K01:2043=163/100M	K01:2043=163/100M	K01:2043=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1202:18844:98575/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1202:18844:98575/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1205:20782:28689/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1205:20782:28689/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1206:10108:83718/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:1:1206:10108:83718/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1212:17964:23344/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:1:1212:17964:23344/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1213:9111:56546/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1213:9111:56546/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1216:4380:98965/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1216:4380:98965/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1216:4493:85995/1	EQ|NE|NE	K01:2143=83/36S36M3I25M	K01:2143=83/36S36M3I25M	K01:2107=83/72M3I25M
+HWI-1KL149:20:C1CU7ACXX:1:1216:4493:85995/2	EQ|EQ|EQ	K01:2043=163/100M	K01:2043=163/100M	K01:2043=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1216:8034:78319/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:1216:8034:78319/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:1316:14751:4679/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:1:1316:14751:4679/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2102:4725:60173/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:1:2102:4725:60173/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2104:19271:24502/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:1:2104:19271:24502/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2104:2016:81735/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2104:2016:81735/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2110:4445:72697/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:1:2110:4445:72697/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2111:2256:47748/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:1:2111:2256:47748/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2115:12497:79931/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:1:2115:12497:79931/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2115:17576:9737/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:1:2115:17576:9737/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2116:7977:30610/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2116:7977:30610/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2201:16984:100451/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2201:16984:100451/2	EQ|EQ|EQ	K01:2059=163/87M13S	K01:2059=163/87M13S	K01:2059=163/87M13S
+HWI-1KL149:20:C1CU7ACXX:1:2203:19912:68616/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2203:19912:68616/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2204:13318:18341/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2204:13318:18341/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2206:10726:12303/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2206:10726:12303/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2206:11557:78671/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2206:11557:78671/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2211:12806:63973/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2211:12806:63973/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2212:17602:62052/1	EQ|EQ|EQ	K01:2104=83/100M	K01:2104=83/100M	K01:2104=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2212:17602:62052/2	EQ|EQ|EQ	K01:2043=163/100M	K01:2043=163/100M	K01:2043=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2212:19408:52552/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2212:19408:52552/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2303:8733:45438/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2303:8733:45438/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2304:9806:12935/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2304:9806:12935/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2305:12165:42334/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:1:2305:12165:42334/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2305:2388:67842/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2305:2388:67842/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2307:14199:91258/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2307:14199:91258/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2307:3121:93985/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2307:3121:93985/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2309:13907:13532/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2309:13907:13532/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2309:20396:57002/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:1:2309:20396:57002/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2312:11602:6630/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2312:11602:6630/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2313:11868:31327/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2313:11868:31327/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2313:9555:94108/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:1:2313:9555:94108/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:1:2315:19820:15046/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:1:2315:19820:15046/2	EQ|EQ|EQ	K01:2081=163/99M1S	K01:2081=163/99M1S	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1101:18362:28315/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1101:18362:28315/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1105:18846:45527/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1105:18846:45527/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1105:5659:65125/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1105:5659:65125/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1108:9609:39170/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1108:9609:39170/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1110:2262:8369/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1110:2262:8369/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1111:18496:5547/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1111:18496:5547/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1112:10132:23322/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1112:10132:23322/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1112:7260:56414/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1112:7260:56414/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1201:6906:82750/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:2:1201:6906:82750/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1202:16231:100362/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1202:16231:100362/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1213:12574:89489/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:2:1213:12574:89489/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1214:20898:3105/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1214:20898:3105/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:```20:C1CU7ACXX:2:1214:7035:46585/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1214:7035:46585/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1215:19107:31048/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1215:19107:31048/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1216:15500:73171/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:2:1216:15500:73171/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1216:6409:43952/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1216:6409:43952/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1301:16595:88662/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1301:16595:88662/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1306:12619:24138/1	EQ|NE|NE	K01:2143=83/36S36M3I25M	K01:2143=83/36S36M3I25M	K01:2107=83/72M3I25M
+HWI-1KL149:20:C1CU7ACXX:2:1306:12619:24138/2	EQ|EQ|EQ	K01:2043=163/100M	K01:2043=163/100M	K01:2043=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1308:8618:21991/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:2:1308:8618:21991/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1309:15540:69632/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1309:15540:69632/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1314:9489:93274/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1314:9489:93274/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:1316:5692:99314/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:1316:5692:99314/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2108:14003:59876/1	EQ|EQ|EQ	K01:2136=83/44M3I53M	K01:2136=83/44M3I53M	K01:2136=83/44M3I53M
+HWI-1KL149:20:C1CU7ACXX:2:2108:14003:59876/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2113:14713:81195/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2113:14713:81195/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2114:13002:89288/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2114:13002:89288/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2201:11170:94334/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:2:2201:11170:94334/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2202:4380:42920/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2202:4380:42920/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2213:14141:87844/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2213:14141:87844/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2213:15510:90052/1	EQ|EQ|EQ	K01:2122=83/57M3I23M1D17M	K01:2122=83/57M3I23M1D17M	K01:2122=83/57M3I23M1D17M
+HWI-1KL149:20:C1CU7ACXX:2:2213:15510:90052/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2213:1759:92031/1	EQ|EQ|EQ	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M	K01:2123=83/56M3I41M
+HWI-1KL149:20:C1CU7ACXX:2:2213:1759:92031/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2215:14279:12564/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2215:14279:12564/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2215:16028:26845/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2215:16028:26845/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2215:16774:44335/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2215:16774:44335/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2301:16926:82641/1	EQ|EQ|EQ	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M	K01:2136=83/43M3I54M
+HWI-1KL149:20:C1CU7ACXX:2:2301:16926:82641/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2309:5711:82879/1	EQ|EQ|EQ	K01:2120=83/100M	K01:2120=83/100M	K01:2120=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2309:5711:82879/2	EQ|EQ|EQ	K01:1990=163/100M	K01:1990=163/100M	K01:1990=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2310:13450:61828/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2310:13450:61828/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2311:14082:99026/1	EQ|EQ|EQ	K01:2213=83/100M	K01:2213=83/100M	K01:2213=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2311:14082:99026/2	EQ|EQ|EQ	K01:2081=163/100M	K01:2081=163/100M	K01:2081=163/100M
+HWI-1KL149:20:C1CU7ACXX:2:2315:4940:7934/1	EQ|EQ|EQ	K01:2133=83/100M	K01:2133=83/100M	K01:2133=83/100M
+HWI-1KL149:20:C1CU7ACXX:2:2315:4940:7934/2	EQ|EQ|EQ	K01:2059=163/100M	K01:2059=163/100M	K01:2059=163/100M</h:pre>
+```
+
+## Cited in
+
+* "Blood transcriptome analysis in a buck-ewe hybrid and its parents" Falker-Gieske, C., Knorr, C. & Tetens, J. Blood transcriptome analysis in a buck-ewe hybrid and its parents. Sci Rep 9, 17492 (2019) doi:10.1038/s41598-019-53901-z
+
+END_DOC
+*/
+
+@Program(name="cmpbams",
+	description="Compare two or more BAM files",
+	keywords={"sam","bam","compare"},
+	creationDate="20130506",
+	modificationDate="20200221"
+	)
+public class CompareBams  extends Launcher
+	{
+	private static final Logger LOG = Logger.build(CompareBams.class).make();
+
+	@Parameter(names={"--no-filter"}, description="Do not filter the reads. Default is to ignore secondary or supplementary alignments.")
+	private boolean no_read_filtering = false;
+
+	@Parameter(names={"-o","--output"},description=OPT_OUPUT_FILE_OR_STDOUT)
+	private Path outputFile = null;
+	
+	@Parameter(names={"-Q","--mapq"},description="min MAPQ")
+	private int min_mapq = 0 ;
+	
+	@Parameter(names={"-d","--distance"},description="distance tolerance between two alignments")
+	private int distance_tolerance = 10 ;
+	
+	@Parameter(names={"-F","--sam"},description="use sam flag for comparaison")
+	private boolean useSamFlag = false;
+	
+	@Parameter(names={"-c","--cigar"},description="use cigar String for comparaison")
+	private boolean useCigar = false;
+	
+	@Parameter(names={"-r","--region"},description=IntervalParserFactory.OPT_DESC)
+	private String REGION = "";
+
+	@Parameter(names={"-R","--reference"},description="For CRAM. "+INDEXED_FASTA_REFERENCE_DESCRIPTION)
+	private Path refPath;
+
+	
+	@ParametersDelegate
+	private WritingSortingCollection writingSortingCollection=new WritingSortingCollection();
+	
+
 	
 	
-	private static class Match
+	private boolean samSequenceDictAreTheSame=true;
+	private final List<SAMSequenceDictionary> sequenceDictionaries=new ArrayList<SAMSequenceDictionary>();
+	private PrintWriter out;
+	
+	private static int matchCompare0(final Match m0, final Match m1) {
+			int i=m0.readName.compareTo(m1.readName);
+			if(i!=0) return i;
+			i= Integer.compare(m0.num_in_pair,m1.num_in_pair);
+			return i;
+			}
+		
+	private  int matchCompare1(final Match m0, final Match m1)
+			{
+			int i= matchCompare0(m0,m1);
+			if(i!=0) return i;
+			//i= m0.bamIndex - m1.bamIndex;//NO ! (when comparing two Set<Match>)
+			//if(i!=0) return i;
+			i= compareTid(m0.bamIndex,m0.tid ,m1.bamIndex, m1.tid);
+			if(i!=0) return i;
+			i= m0.pos - m1.pos;
+			if(i!=0) return i;
+			i= m0.flag - m1.flag;
+			if(i!=0) return i;
+			i= m0.cigar.compareTo(m1.cigar);
+			return 0;
+			}
+		
+	
+	
+	private class MatchCodec
+		extends AbstractDataCodec<Match>
 		{
-		byte tid;
-		int pos;
+		@Override
+		public MatchCodec clone()
+			{
+			return new MatchCodec();
+			}
+		@Override
+		public Match decode(final DataInputStream dis) throws IOException
+			{
+			final Match m=new Match();
+			try {
+				m.readName=dis.readUTF();
+				}
+			catch(IOException err)
+				{
+				return null;
+				}
+			m.bamIndex=dis.readInt();
+			m.tid=dis.readInt();
+			m.pos=dis.readInt();
+			m.num_in_pair=dis.readInt();
+			if(useSamFlag) m.flag=dis.readInt();
+			if(useCigar) m.cigar=dis.readUTF();
+			return m;
+			}
+		@Override
+		public void encode(final DataOutputStream dos, final Match match)
+				throws IOException
+			{
+			dos.writeUTF(match.readName);
+			dos.writeInt(match.bamIndex);
+			dos.writeInt(match.tid);
+			dos.writeInt(match.pos);
+			dos.writeInt(match.num_in_pair);
+			if(useSamFlag) dos.writeInt(match.flag);
+			if(useCigar) dos.writeUTF(match.cigar);
+			}
+		
+		}
+	
+	private class Match
+		{
+		String readName;
+		int num_in_pair=0;
+		int tid=-1;
+		int bamIndex=-1;
+		int pos=-1;
 		int flag=0;
+		String cigar="";
 
 		@Override
 		public int hashCode()
 			{
 			int result = 1;
+			result = 31 * result + num_in_pair;
 			result = 31 * result + pos;
 			result = 31 * result + tid;
-			//NO result = 31 * result + flag;
+			result = 31 * result + readName.hashCode();
+			result = 31 * result + bamIndex;
+			result = 31 * result + cigar.hashCode();
 			return result;
 			}
 		@Override
-		public boolean equals(Object obj)
+		public boolean equals(final Object obj)
 			{
 			if (this == obj) { return true; }
 			if (obj == null) { return false; }
-			Match other = (Match) obj;
-			if (tid != other.tid) { return false; }
+			final Match other = (Match) obj;
+			if (num_in_pair != other.num_in_pair) { return false; }
+			if (compareTid(this.bamIndex,tid,other.bamIndex,other.tid)!=0) { return false; }
 			if(tid==-1) return true;
 			if (pos != other.pos) { return false; }
-			//NO if (flag != other.flag) { return false; }
+			if (bamIndex != other.bamIndex) { return false; }
+			if(!readName.equals(other.readName)) return false;
 			return true;
 			}
 		}
 	
-	/** fileid to matches */
-	private List<Set<Match>> decode(final DatabaseEntry data)
-		throws IOException
+	private String norm(String s1)
 		{
-		TupleInput in=new TupleInput(data.getData());
-		List<Set<Match>> L=new ArrayList<Set<Match>>(this.countBams);
-		for(int i=0;i< this.countBams;++i)
-			{
-			byte nmatches=in.readByte();
-			Set<Match> set=new HashSet<Match>(nmatches);
-			L.add(set);
-			for(int j=0;j< nmatches;++j)
-				{
-				Match m=new Match();
-				m.tid=in.readByte();
-				m.pos=in.readInt();
-				m.flag=this.useSamFlag?in.readInt():0;
-				set.add(m);
-				}
-			}
-		
-		return L;
+		if(s1.startsWith("chr")) s1=s1.substring(3);
+		if(s1.startsWith("0")) s1=s1.substring(1);
+		if(s1.equals("MT")) s1="M";
+		return s1;
 		}
 	
-
-	
-	private void encode(DatabaseEntry data,final List<Set<Match>> L)
+	private int compare(final String s1,final String s2)
 		{
-		TupleOutput out=new TupleOutput();
-		for(Set<Match> set:L)
+		return norm(s1).compareToIgnoreCase(norm(s2));
+		}
+	
+	private int compareTid(int file_id1,int tid1,int file_id2,int tid2)
+		{
+		if(samSequenceDictAreTheSame) return tid1-tid2;
+		if(tid1==-1)
 			{
-			out.writeByte((byte)Math.min(Byte.MAX_VALUE, set.size()));
-			int count=0;
-			for(Match m:set)
-				{
-				if(++count>=Byte.MAX_VALUE) break;
-				out.writeByte(m.tid);
-				out.writeInt(m.pos);
-				if(this.useSamFlag) out.writeInt(m.flag);
-				}
+			return tid2==-1?0:-1;
 			}
-		data.setData(out.getBufferBytes(),out.getBufferOffset(),out.getBufferLength());
+		if(tid2==-1)
+			{
+			return 1;
+			}
+		final String chrom1=this.sequenceDictionaries.get(file_id1).getSequence(tid1).getSequenceName();
+		final String chrom2=this.sequenceDictionaries.get(file_id2).getSequence(tid2).getSequenceName();
+		if(chrom1==null)
+			{
+			return chrom2==null?0:-1;
+			}
+		if(chrom2==null) return 1;
+		return compare(chrom1,chrom2);
 		}
 	
 	private void print(final Set<Match> set,final SAMSequenceDictionary dict)
 		{
 		boolean first=true;
-		for(Match m:set)
+		for(final Match m:set)
 			{
-			if(!first)System.out.print(',');
+			if(!first)this.out.print(',');
 			first=false;
-			if(m.tid<0){ System.out.print("unmapped"); continue;}
-			SAMSequenceRecord ssr=(dict==null?null:dict.getSequence(m.tid));
+			if(m.tid<0){ this.out.print("unmapped"); continue;}
+			final SAMSequenceRecord ssr=(dict==null?null:dict.getSequence(m.tid));
 			String seqName=(ssr==null?null:ssr.getSequenceName());
 			if(seqName==null) seqName="tid"+m.tid;
-			System.out.print(String.valueOf(seqName+":"+(m.pos)));
-			if(this.useSamFlag) System.out.print("="+m.flag);
+			this.out.print(String.valueOf(seqName+":"+(m.pos)));
+			if(this.useSamFlag) this.out.print("="+m.flag);
+			if(this.useCigar) this.out.print("/"+m.cigar);
 			}
-		if(first) System.out.print("(empty)");
+		if(first) this.out.print("(empty)");
 		}
 	
 	
-	private void run(String[] args)
-		throws Exception
-		{
-		int optind=0;
-		while(optind< args.length)
+	
+	
+	
+	private final List<Path> inputBamsList=new ArrayList<>();
+	
+    private boolean same(final Set<Match> set1,final Set<Match> set2)
+    	{
+    	for(final Match m0:set1)
+    		{
+    		for(final Match m1:set2)
+	    		{
+    			int i=m0.readName.compareTo(m1.readName);
+    			if(i!=0) continue;
+    			i=m0.num_in_pair-m1.num_in_pair;
+    			if(i!=0) continue;
+    			//i= m0.bamIndex - m1.bamIndex;//NO ! (when comparing two Set<Match>)
+    			//if(i!=0) return i;
+    			i= m0.tid - m1.tid;
+    			if(i!=0) continue;
+    			i= Math.abs(m0.pos - m1.pos);
+    			if(i>this.distance_tolerance) continue;
+    			i= m0.flag - m1.flag;
+    			if(i!=0) continue;
+    			i= m0.cigar.compareTo(m1.cigar);
+    			if(i!=0) continue;
+    			return true;
+	    		}
+    		}
+    	return false;
+    	}
+    
+    @Override
+    public int doWork(final List<String> args) {
+    	this.inputBamsList.addAll( IOUtils.unrollPaths(args));
+   		SortingCollection<Match> database = null;
+		SamReader samFileReader=null;
+		CloseableIterator<Match> iter=null;
+		try
 			{
-			if(args[optind].equals("-h") ||
-			   args[optind].equals("-help") ||
-			   args[optind].equals("--help"))
+			if(this.inputBamsList.size() <2)
 				{
-				System.err.println("Pierre Lindenbaum PhD. 2013");
-				System.err.println("Options:");
-				System.err.println(" -h help; This screen.");
-				System.err.println(" -d <berkeleydb-dir>.");
-				System.err.println(" -F use samFlag");
-				return;
+				LOG.error("Need more bams please, got "+this.inputBamsList.size());
+				return -1;
 				}
-			else if(args[optind].equals("-d") && optind+1< args.length)
-				{
-				this.dbHome=new File(args[++optind]);
-				}
-			else if(args[optind].equals("-F") )
-				{
-				this.useSamFlag=true;
-				}
-			else if(args[optind].equals("--"))
-				{
-				optind++;
-				break;
-				}
-			else if(args[optind].startsWith("-"))
-				{
-				System.err.println("Unknown option "+args[optind]);
-				return;
-				}
-			else 
-				{
-				break;
-				}
-			++optind;
-			}
-		if(this.dbHome==null)
-			{
-			System.err.println("db-home undefined");
-			return;
-			}
-		this.countBams=args.length-optind;
-		if(this.countBams<2)
-			{
-			System.err.println("Need more bams please");
-			return;
-			}
-		DatabaseEntry key=new DatabaseEntry();
-		DatabaseEntry data=new DatabaseEntry();
-
-		EnvironmentConfig envConfig= new EnvironmentConfig();
-		envConfig.setAllowCreate(true);
-		envConfig.setReadOnly(false);
-		envConfig.setConfigParam(EnvironmentConfig.LOG_FILE_MAX,"250000000");
-		envConfig.setTransactional(true);
-		this.environment= new Environment(this.dbHome, envConfig);
-		
-		this.txn=this.environment.beginTransaction(null, null);
-		DatabaseConfig cfg= new DatabaseConfig();
-		cfg.setAllowCreate(true);
-		cfg.setReadOnly(false);
-		cfg.setTransactional(true);
-		cfg.setKeyPrefixing(true);
-		this.database= this.environment.openDatabase(txn,DATABASENAME,cfg);
-		
-		List<SAMSequenceDictionary> sequenceDictionaries=new ArrayList<SAMSequenceDictionary>(this.countBams);
-		
-		for(int currentSamFileIndex=0;
-				currentSamFileIndex<this.countBams;
-				currentSamFileIndex++ )
-			{
-			long nReads=0L;
-			File samFile=new File(args[optind+currentSamFileIndex]);
-			LOG.info("Opening "+samFile);
-			SAMFileReader samFileReader=new SAMFileReader(samFile);
-			samFileReader.setValidationStringency(ValidationStringency.SILENT);
-			SAMSequenceDictionary dict=samFileReader.getFileHeader().getSequenceDictionary();
-			if(dict.getSequences().size()>=Byte.MAX_VALUE)
-				{
-				System.err.println("Too many Ref Sequences ("+ dict.getSequences().size() +") . Limited to "+Byte.MAX_VALUE);
-				return;
-				}
-			sequenceDictionaries.add(dict);
 			
-			for(Iterator<SAMRecord> iter=samFileReader.iterator();
-					iter.hasNext(); )
+			database = SortingCollection.newInstance(
+					Match.class,
+					new MatchCodec(),
+					(A,B)->matchCompare0(A, B),
+					this.writingSortingCollection.getMaxRecordsInRam(),
+					this.writingSortingCollection.getTmpPaths()
+					);
+			this.samSequenceDictAreTheSame=true;
+			database.setDestructiveIteration(true);
+	
+			
+			for(int currentSamFileIndex=0;
+					currentSamFileIndex<this.inputBamsList.size();
+					currentSamFileIndex++ )
 				{
-				if(nReads++%10000000==0) LOG.info("in "+samFile+" count:"+nReads);
-				SAMRecord rec=iter.next();
-				StringBinding.stringToEntry(rec.getReadName(), key);
+				final Path samFile=this.inputBamsList.get(currentSamFileIndex);
 				
-				List<Set<Match>> matches=null;
-				if(this.database.get(this.txn, key, data, LockMode.DEFAULT)==OperationStatus.SUCCESS)
+				
+				samFileReader= super.createSamReaderFactory().
+						referenceSequence(this.refPath).
+						open(samFile);
+				final SAMSequenceDictionary dict=samFileReader.getFileHeader().getSequenceDictionary();
+				if(dict==null || dict.isEmpty())
 					{
-					matches=decode(data); 
+					LOG.error("Empty Dict  in "+samFile);
+					return -1;
+					}
+				
+				if(!this.sequenceDictionaries.isEmpty() &&
+					!SequenceUtil.areSequenceDictionariesEqual(this.sequenceDictionaries.get(0), dict))
+					{
+					this.samSequenceDictAreTheSame=false;
+					LOG.warn("FOOL !! THE SEQUENCE DICTIONARIES ARE **NOT** THE SAME. I will try to compare anyway but it will be slower.");
+					}
+				this.sequenceDictionaries.add(dict);
+				
+				
+				final Optional<SimpleInterval> interval;
+				if(!StringUtils.isBlank(this.REGION))
+					{
+					interval =  IntervalParserFactory.newInstance().dictionary(dict).make().apply(this.REGION);
+					
+					if(!interval.isPresent())
+						{
+						LOG.error("Cannot parse "+REGION+" (bad syntax or not in dictionary)");
+						return -1;
+						}
 					}
 				else
 					{
-					matches=new ArrayList<Set<Match>>( this.countBams);
-					for(int i=0;i< this.countBams;++i) matches.add(new HashSet<Match>());
+					interval = Optional.empty();
 					}
 				
-				Match match=new Match();
-				match.tid=(byte)rec.getReferenceIndex().intValue();
-				match.pos=rec.getAlignmentStart();
-				match.flag=rec.getFlags();
-				matches.get(currentSamFileIndex).add(match);
-				encode(data,matches);
-				if(this.database.put(this.txn, key, data)!=OperationStatus.SUCCESS)
+				
+				SAMRecordIterator it=null;
+				if(!interval.isPresent())
 					{
-					System.err.println("BDB error.");
-					System.exit(-1);
+					it=samFileReader.iterator();
 					}
-				}
-			samFileReader.close();
-			LOG.info("Close "+samFile);
-			}
-		LOG.info("Writing results....");
-		//compute the differences for each read
-		System.out.print("#READ-Name\t");
-		for(int x=0;x<this.countBams;++x)
-			{
-			for(int y=x+1;y<this.countBams;++y)
-				{
-				if(!(x==0 && y==1)) System.out.print("|");
-				System.out.print(args[optind+x]);
-				System.out.print(" ");
-				System.out.print(args[optind+y]);
-				}
-			}
-		for(int x=0;x<this.countBams;++x)
-			{
-			System.out.print("\t"+args[optind+x]);
-			}
-		System.out.println();
-		
-		key=new DatabaseEntry();
-		Cursor c=this.database.openCursor(txn,null);;
-		while(c.getNext(key, data,LockMode.DEFAULT)==OperationStatus.SUCCESS)
-			{
-			System.out.print(StringBinding.entryToString(key));
-			System.out.print("\t");
-			
-			List<Set<Match>> matches=decode(data);
-
-			for(int x=0;x<this.countBams;++x)
-				{
-				Set<Match> first=matches.get(x);
-				for(int y=x+1;y<this.countBams;++y)
+				else
 					{
-					if(!(x==0 && y==1)) System.out.print("|");
-					Set<Match> second=matches.get(y);
-					if(first.equals(second))
+					it=samFileReader.queryOverlapping(
+							interval.get().getContig(),
+							interval.get().getStart(),
+							interval.get().getEnd()
+							);
+					}
+				final ProgressFactory.Watcher<SAMRecord> progress=ProgressFactory.newInstance().dictionary(dict).logger(LOG).build();
+				while(it.hasNext() )
+					{
+					final SAMRecord rec=progress.apply(it.next());
+					if(!rec.getReadUnmappedFlag())
 						{
-						System.out.print("EQ");
+						if(rec.getMappingQuality() < this.min_mapq) continue;
+						if(!this.no_read_filtering && rec.isSecondaryOrSupplementary()) continue;
+						}
+					final Match m=new Match();
+					if(rec.getReadPairedFlag())
+						{
+						m.num_in_pair=(rec.getFirstOfPairFlag()?1:2);
 						}
 					else
 						{
-						System.out.print("NE");
+						m.num_in_pair=0;
 						}
+					m.readName=rec.getReadName();
+					m.bamIndex=currentSamFileIndex;
+					m.flag=rec.getFlags();
+					m.cigar=rec.getCigarString();
+					if(m.cigar==null ) m.cigar="";
+					if(rec.getReadUnmappedFlag())
+						{
+						m.tid=-1;
+						m.pos=-1;
+						}
+					else
+						{
+						m.tid=rec.getReferenceIndex();
+						m.pos=rec.getAlignmentStart();
+						}
+					database.add(m);
+					}
+				progress.close();
+				it.close();
+				samFileReader.close();
+				samFileReader=null;
+				}
+			database.doneAdding();
+			LOG.info("Writing results....");
+			
+			this.out = super.openPathOrStdoutAsPrintWriter(this.outputFile);
+			
+			//compute the differences for each read
+			this.out.print("#READ-Name\t");
+			for(int x=0;x<this.inputBamsList.size();++x)
+				{
+				for(int y=x+1;y<this.inputBamsList.size();++y)
+					{
+					if(!(x==0 && y==1)) this.out.print("|");
+					this.out.print(inputBamsList.get(x));
+					this.out.print(" ");
+					this.out.print(inputBamsList.get(y));
 					}
 				}
-
-			for(int x=0;x<this.countBams;++x)
+			for(int x=0;x<this.inputBamsList.size();++x)
 				{
-				System.out.print("\t");
-				print(matches.get(x),sequenceDictionaries.get(x));
+				this.out.print("\t"+inputBamsList.get(x));
+				}
+			this.out.println();
+			
+			/* create an array of set<Match> */
+			final Comparator<Match> match_comparator=(A,B)->matchCompare1(A, B);
+			final List<Set<Match>> matches=new ArrayList<Set<CompareBams.Match>>(this.inputBamsList.size());
+			while(matches.size() < this.inputBamsList.size())
+				{
+				matches.add(new TreeSet<CompareBams.Match>(match_comparator));
 				}
 			
-			System.out.println();
+			iter = database.iterator();
+			String currReadName=null;
+			int curr_num_in_pair=-1;
+			for(;;)
+				{
+				Match nextMatch = null;
+				if(iter.hasNext())
+					{
+					nextMatch = iter.next();
+					}
+				if(nextMatch==null ||
+					(currReadName!=null && !currReadName.equals(nextMatch.readName)) ||
+					(curr_num_in_pair!=-1 && curr_num_in_pair!=nextMatch.num_in_pair))
+					{
+					if(currReadName!=null)
+						{
+						this.out.print(currReadName);
+						if(curr_num_in_pair>0)
+							{
+							this.out.print("/");
+							this.out.print(curr_num_in_pair);
+							}
+						this.out.print("\t");
+						
+						
+						for(int x=0;x<this.inputBamsList.size();++x)
+							{
+							final Set<Match> first=matches.get(x);
+							for(int y=x+1;y<this.inputBamsList.size();++y)
+								{
+								if(!(x==0 && y==1)) this.out.print("|");
+								final Set<Match> second=matches.get(y);
+								if(same(first,second))
+									{
+									this.out.print("EQ");
+									}
+								else
+									{
+									this.out.print("NE");
+									}
+								}
+							}
+	
+						for(int x=0;x<this.inputBamsList.size();++x)
+							{
+							this.out.print("\t");
+							print(matches.get(x),sequenceDictionaries.get(x));
+							}
+						
+						this.out.println();
+						}
+					if(nextMatch==null) break;
+					for(final Set<Match> set:matches) set.clear();
+					}
+				currReadName=nextMatch.readName;
+				curr_num_in_pair=nextMatch.num_in_pair;
+				matches.get(nextMatch.bamIndex).add(nextMatch);
+				if(this.out.checkError()) break;
+				}
+			
+			iter.close();
+			this.out.flush();
+			return 0;
 			}
-		c.close();
-		this.database.close();
-		this.environment.removeDatabase(txn, DATABASENAME);
-		this.txn.commit();
-		this.environment.cleanLog();
-		this.environment.close();
+		catch(final Throwable err)
+			{
+			LOG.error(err);
+			return -1;
+			}
+		finally
+			{
+			if(database!=null) database.cleanup();
+			CloserUtil.close(samFileReader);
+			CloserUtil.close(this.out);this.out=null;
+			}
 		}
 		
-	public static void main(String[] args) throws Exception
+	public static void main(final String[] args) throws Exception
 		{
-		new CompareBams().run(args);
+		new CompareBams().instanceMainWithExit(args);
 		}
 }
